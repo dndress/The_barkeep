@@ -2,8 +2,9 @@
 //   1. Load + validate env (fail fast on misconfig).
 //   2. Build Fastify app (Fastify owns the logger internally).
 //   3. Listen.
-//   4. Wire signal handlers so Docker stop is graceful.
+//   4. Wire signal handlers so Docker stop is graceful (release DB pool too).
 import { loadConfig } from './config.js';
+import { disconnectPrisma } from './db.js';
 import { buildServer } from './server.js';
 
 async function main(): Promise<void> {
@@ -22,6 +23,7 @@ async function main(): Promise<void> {
     app.log.info(`received ${signal}, shutting down`);
     try {
       await app.close();
+      await disconnectPrisma();
       process.exit(0);
     } catch (err) {
       app.log.error({ err }, 'error during shutdown');
