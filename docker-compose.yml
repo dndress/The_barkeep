@@ -17,7 +17,12 @@
 # `docker compose up --build`. The craig_rec mount will be empty locally,
 # which is fine for Stage 1 (we don't read any files yet).
 services:
-  db:
+  # Renamed from `db` to `barkeep-db` to avoid a service-name collision with
+  # Chronicler's `db` service. Both stacks share Chronicler's Docker network
+  # (see CHRONICLER_NETWORK below), and Docker DNS round-robins names that
+  # resolve to multiple containers — so two unrelated `db` services would
+  # cause auth failures depending on which container answered first.
+  barkeep-db:
     image: pgvector/pgvector:pg17
     restart: always
     environment:
@@ -36,14 +41,14 @@ services:
     build: .
     restart: always
     depends_on:
-      db:
+      barkeep-db:
         condition: service_healthy
     environment:
       BARKEEP_WEBHOOK_SECRET: ${BARKEEP_WEBHOOK_SECRET}
       PORT: 3001
       HOST: 0.0.0.0
       LOG_LEVEL: ${LOG_LEVEL:-info}
-      DATABASE_URL: postgresql://barkeep:barkeep@db:5432/barkeep?schema=public
+      DATABASE_URL: postgresql://barkeep:barkeep@barkeep-db:5432/barkeep?schema=public
       CHRONICLER_REC_PATH: /app/rec
       NODE_ENV: production
     ports:
