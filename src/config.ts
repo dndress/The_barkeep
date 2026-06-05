@@ -16,8 +16,15 @@ const Env = z.object({
   // postgresql://user:pass@host:5432/dbname?schema=public
   DATABASE_URL: z.string().url(),
 
-  // Optional; read by later stages when we cook raw artifacts.
+  // Filesystem paths
   CHRONICLER_REC_PATH: z.string().default('/app/rec'),
+  COOKED_PATH: z.string().default('/app/data/cooked'),
+  // Where vendored cook.sh lives; runtime Dockerfile puts it here.
+  COOK_SCRIPT_DIR: z.string().default('/app/vendor'),
+
+  // Pipeline worker tuning
+  WORKER_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(30_000),
+  COOK_TIMEOUT_MS: z.coerce.number().int().positive().default(30 * 60 * 1000),
 
   NODE_ENV: z.enum(['development', 'production', 'test']).default('production')
 });

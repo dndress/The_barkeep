@@ -10,7 +10,9 @@ This repo contains the Barkeep service only. Chronicler lives in its own repo.
 
 **Stage 2 (done):** Prisma schema covering all eventual tables, idempotent seed of 2 campaigns + 9 users + 16 characters + channel mappings, `prisma db push` on container boot, webhook handler now persists `Session` + `Chapter` rows.
 
-**Not yet:** cook runner, Gemini transcription/summarization/embedding, voice-intro extractor, Discord bot, recap scheduler.
+**Stage 3 (done):** Vendored Craig's `cook` (audio splitter) into the image, runtime audio toolchain (ffmpeg, flac, opus-tools, vorbis-tools, zip), a `barkeep_cooked` volume for per-track FLAC output, and a polling pipeline worker that processes new chapters into per-track audio files and writes `AudioFile` rows mapped to known users by Discord ID.
+
+**Not yet:** Gemini transcription/summarization/embedding, voice-intro extractor, Discord bot, recap scheduler.
 
 ## Repo layout
 
@@ -20,16 +22,24 @@ The_barkeep/
 │   ├── schema.prisma     # full data model (12 tables)
 │   └── seed.ts           # idempotent reference-data seed
 ├── src/
-│   ├── index.ts          # entrypoint + signal handling
+│   ├── index.ts          # entrypoint, starts server + worker, signal handling
 │   ├── config.ts         # env loading + validation (zod)
 │   ├── logger.ts         # pino logger options factory
 │   ├── server.ts         # Fastify app factory
 │   ├── db.ts             # PrismaClient singleton
+│   ├── pipeline/
+│   │   ├── cook.ts       # subprocess wrapper around vendored cook.sh
+│   │   ├── users.ts      # parser for .ogg.users sidecar
+│   │   └── worker.ts     # polling loop: claim chapter → cook → AudioFile rows
 │   └── webhook/
 │       ├── schema.ts     # zod schema for Chronicler payload (v2)
 │       └── route.ts      # POST /api/recordings/complete handler
-├── Dockerfile            # multi-stage; prisma generate + tsc → runtime
-├── docker-compose.yml    # barkeep-db + barkeep, shared craig_rec volume
+├── vendor/               # bundled cook from Craig; see vendor/README.md
+│   ├── cook.sh
+│   ├── buildCook.sh
+│   └── cook/             # .c sources compiled at docker build, plus .js helpers
+├── Dockerfile            # multi-stage; prisma generate + tsc + cook compile → runtime
+├── docker-compose.yml    # barkeep-db + barkeep, shared craig_rec, barkeep_cooked
 ├── entrypoint.sh         # prisma db push → seed → exec node
 ├── package.json
 ├── tsconfig.json
@@ -155,6 +165,62 @@ BARKEEP_WEBHOOK_URL=http://barkeep:3001/api/recordings/complete
 BARKEEP_WEBHOOK_SECRET=<same value as the Barkeep stack's .env>
 ```
 
+## Stage 3 verification checklist
+
+After deploying Stage 3, run these against the VPS:
+
+```bash
+# 1. Confirm cook tools are present in the Barkeep image
+sudo docker exec $(sudo docker ps -qf name=barkeep | head -1) sh -c \
+  'which ffmpeg flac opusenc oggenc zip unzip && ls /app/vendor/cook/oggtracks /app/vendor/cook.sh'
+# Expect: paths printed, no errors
+
+# 2. Confirm the cook binaries got compiled at build time
+sudo docker exec $(sudo docker ps -qf name=barkeep | head -1) sh -c \
+  'ls -la /app/vendor/cook/ | grep -E "oggtracks|oggcorrect|oggduration|wavduration" | grep -v "\.c$"'
+# Expect: 4 executable binaries (no .c suffix)
+
+# 3. Confirm the worker is running and polling
+sudo docker logs $(sudo docker ps -qf name=barkeep | head -1) 2>&1 | grep "pipeline worker"
+# Expect: "pipeline worker started"
+
+# 4. Real chapter test (needs an actual Chronicler recording)
+#    Start a Discord recording, stop it. Wait up to (poll interval + cook time)
+#    — typically 30s to a few minutes depending on chapter length.
+sudo docker exec -it $(sudo docker ps -qf name=barkeep-db) \
+  psql -U barkeep -d barkeep -c \
+  "SELECT s.recording_id, s.status,
+          (SELECT count(*) FROM chapters c WHERE c.session_id = s.id) AS chapters,
+          (SELECT count(*) FROM audio_files af
+             JOIN chapters c ON c.id = af.chapter_id
+             WHERE c.session_id = s.id) AS audio_files
+   FROM sessions s
+   ORDER BY s.created_at DESC LIMIT 5;"
+# Expect: latest session has audio_files = (chapters * track_count_per_chapter)
+
+# 5. Spot-check a cooked file on disk
+sudo docker exec $(sudo docker ps -qf name=barkeep | head -1) sh -c \
+  'find /app/data/cooked -name "*.flac" -printf "%p (%s bytes)\n" | head -10'
+# Expect: per-track FLAC files; non-zero sizes
+```
+
+If a chapter fails to cook, the worker logs an error, marks the session FAILED, and sets `processedAt` so it stops retrying. To retry after fixing the issue:
+
+```sql
+UPDATE chapters SET processed_at = NULL WHERE id = '<chapter-uuid>';
+UPDATE sessions SET status = 'RECEIVING' WHERE id = '<session-uuid>';
+```
+
+The worker picks it back up on the next 30-second tick.
+
+## Worker behavior
+
+- **Polls** every `WORKER_POLL_INTERVAL_MS` (default 30s).
+- **Drains** up to 10 chapters per tick if multiple are queued; goes back to sleep when caught up.
+- **Single-worker semantics** — there's only one process. If we ever scale out, switch to `SELECT ... FOR UPDATE SKIP LOCKED` in the claim query.
+- **Failure handling** — cook failures mark the chapter `processedAt = now()` (stops retry thrash) and the session `status = FAILED`. The cook stderr tail is logged. Operators re-null `processedAt` to retry.
+- **No transcription yet** — Stage 3 leaves the session in `status: COOKING` (or `FAILED`). Stage 4 will transition it through `TRANSCRIBING → SUMMARIZING → READY → POSTED`.
+
 ## Next stage
 
-Stage 3: bundle Craig's `cook` binary into the runtime image; pipeline worker pops new chapters, cooks per-track FLAC files into `audio_files`, and stages them for Gemini File API upload. No transcription yet — Stage 3 just gets us from "chapters in DB" to "cooked tracks on disk with rows in `audio_files`."
+Stage 4: Gemini transcription. The worker grows a second step: after cooking, upload each `AudioFile` to the Gemini File API, transcribe with `gemini-2.5-flash`, write `Transcript` rows, and advance the session to `TRANSCRIBING → READY`.

@@ -2,9 +2,11 @@
 //   1. Load + validate env (fail fast on misconfig).
 //   2. Build Fastify app (Fastify owns the logger internally).
 //   3. Listen.
-//   4. Wire signal handlers so Docker stop is graceful (release DB pool too).
+//   4. Start the pipeline worker.
+//   5. Wire signal handlers so Docker stop is graceful (release DB pool too).
 import { loadConfig } from './config.js';
 import { disconnectPrisma } from './db.js';
+import { startWorker } from './pipeline/worker.js';
 import { buildServer } from './server.js';
 
 async function main(): Promise<void> {
@@ -19,9 +21,21 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
+  const worker = startWorker(
+    {
+      cookScriptDir: config.COOK_SCRIPT_DIR,
+      cookedBaseDir: config.COOKED_PATH,
+      pollIntervalMs: config.WORKER_POLL_INTERVAL_MS,
+      cookTimeoutMs: config.COOK_TIMEOUT_MS
+    },
+    app.log
+  );
+
   const shutdown = async (signal: string): Promise<void> => {
     app.log.info(`received ${signal}, shutting down`);
     try {
+      // Stop accepting new work first so in-flight cooks can finish.
+      await worker.stop();
       await app.close();
       await disconnectPrisma();
       process.exit(0);

@@ -1,50 +1,79 @@
-# Multi-stage. Build stage runs prisma generate + tsc; runtime stage carries
-# the smaller prod-only node_modules plus the generated Prisma client.
+# Multi-stage. Build stage runs prisma generate + tsc + compiles vendored
+# cook binaries; runtime stage carries the smaller prod-only node_modules
+# plus the cook binaries and audio tooling.
 #
 # Notes:
 #   - openssl is required at runtime by Prisma's query engine.
 #   - We keep `prisma` and `tsx` as prod deps (not devDeps) so the runtime
 #     image can run `prisma db push`, `prisma db seed`, and execute the
 #     TS seed file directly without a separate compile step for it.
+#   - Cook tooling: ffmpeg, flac, opus-tools, vorbis-tools, zip/unzip, plus
+#     util-linux for flock + procps for process tools. node is already
+#     present (we're on node:20 base) for chapinfo.js/userinfo.js helpers.
 FROM node:20-bookworm-slim AS build
 WORKDIR /app
-# openssl + ca-certificates so prisma generate can fetch the right engine
-RUN apt-get update && apt-get install -y --no-install-recommends openssl ca-certificates \
+# openssl + ca-certificates so prisma generate can fetch the right engine;
+# gcc/make to compile the vendored cook binaries
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      openssl ca-certificates build-essential \
     && rm -rf /var/lib/apt/lists/*
 COPY package.json ./
 RUN npm install
 COPY prisma ./prisma
 COPY tsconfig.json ./
 COPY src ./src
+COPY vendor ./vendor
 RUN npx prisma generate
 RUN npx tsc -p .
+# Compile cook helpers. buildCook.sh does `gcc -O3 -o name name.c` for each
+# *.c in cook/. Output binaries land alongside the .c sources.
+RUN chmod +x vendor/cook.sh vendor/buildCook.sh && \
+    sh vendor/buildCook.sh && \
+    ls -la vendor/cook/ | head -30
 
 FROM node:20-bookworm-slim AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
-# openssl required at runtime by the Prisma engine binary
-RUN apt-get update && apt-get install -y --no-install-recommends openssl ca-certificates \
+# openssl for Prisma; audio tooling for cook.sh; util-linux gives us flock,
+# procps gives us things like ps the cook scripts occasionally need.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      openssl ca-certificates \
+      ffmpeg flac opus-tools vorbis-tools zip unzip \
+      util-linux procps \
     && rm -rf /var/lib/apt/lists/*
 
 # Production deps only (still includes prisma + tsx — see header note)
 COPY package.json ./
 RUN npm install --omit=dev --omit=optional && npm cache clean --force
 
-# Generated Prisma client (lives under node_modules/.prisma + @prisma/client/runtime)
+# Generated Prisma client
 COPY --from=build /app/node_modules/.prisma ./node_modules/.prisma
 COPY --from=build /app/node_modules/@prisma/client ./node_modules/@prisma/client
 
-# Schema + seed (db push and seed CLI both read prisma/)
+# Schema + seed
 COPY prisma ./prisma
 
 # Compiled app code
 COPY --from=build /app/dist ./dist
 
+# Vendored cook (compiled binaries + shell driver + JS helpers)
+COPY --from=build /app/vendor ./vendor
+
+# cook.sh does `cd "$SCRIPTBASE/rec"` to find raw files. Our raw files live
+# in /app/rec (mounted from Chronicler's craig_rec volume at runtime). A
+# symlink lets cook.sh find them at its expected path without us having to
+# patch every $ID.ogg.* reference inside the script.
+RUN ln -sfn /app/rec /app/vendor/rec
+
 # Entrypoint
 COPY entrypoint.sh ./entrypoint.sh
 RUN chmod +x ./entrypoint.sh
 
-# Drop privileges. node user (uid 1000) exists in the base image.
+# Create the cooked-output dir so the worker can write to it without
+# needing the volume to be pre-populated. Owned by node so the unprivileged
+# user can write.
+RUN mkdir -p /app/data/cooked && chown -R node:node /app/data
+
 USER node
 EXPOSE 3001
 ENTRYPOINT ["./entrypoint.sh"]

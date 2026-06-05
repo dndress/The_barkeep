@@ -59,6 +59,10 @@ services:
     volumes:
       # Read-only mount of Chronicler's recording volume. See note at top.
       - 'craig_rec:/app/rec:ro'
+      # Barkeep-managed output for cooked per-track audio. Lives entirely
+      # in our stack — Chronicler never touches it. Layout:
+      #   /app/data/cooked/<sessionId>/<chapterIndex>/<track>_<user>.flac
+      - 'barkeep_cooked:/app/data/cooked'
     healthcheck:
       test: ['CMD', 'node', '-e', "require('http').get('http://127.0.0.1:3001/health', r => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"]
       interval: 30s
@@ -67,6 +71,7 @@ services:
 
 volumes:
   barkeep_db:
+  barkeep_cooked:
   craig_rec:
     external: true
     # Override at deploy time via env or hard-code here once you know the
