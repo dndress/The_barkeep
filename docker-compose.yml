@@ -1,0 +1,78 @@
+# Barkeep stack. Designed for Dokploy alongside the Chronicler stack.
+#
+# IMPORTANT — two things must align with Chronicler at deploy time:
+#   1. The `craig_rec` volume: in Dokploy each stack's volumes are scoped to
+#      that stack by default. To share Chronicler's recording volume, we
+#      reference it as external and pin its real (Dokploy-prefixed) name via
+#      the CRAIG_REC_VOLUME env var. Set this in Dokploy's env for the
+#      Barkeep stack — e.g. `chronicler-xxxx_craig_rec` (check Dokploy UI for
+#      the exact volume name on the Chronicler stack).
+#   2. The Docker network: same idea. Set CHRONICLER_NETWORK to the network
+#      name Chronicler's services live on so Barkeep can reach `chronicler`
+#      (the container name) directly. Not strictly required for Stage 1
+#      (Chronicler talks TO Barkeep, not the other way around), but declared
+#      now so future stages "just work".
+#
+# Local-dev use: copy .env.example to .env, set the secret, then
+# `docker compose up --build`. The craig_rec mount will be empty locally,
+# which is fine for Stage 1 (we don't read any files yet).
+services:
+  db:
+    image: pgvector/pgvector:pg17
+    restart: always
+    environment:
+      POSTGRES_USER: barkeep
+      POSTGRES_PASSWORD: barkeep
+      POSTGRES_DB: barkeep
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U barkeep']
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - 'barkeep_db:/var/lib/postgresql/data'
+
+  barkeep:
+    build: .
+    restart: always
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      BARKEEP_WEBHOOK_SECRET: ${BARKEEP_WEBHOOK_SECRET}
+      PORT: 3001
+      HOST: 0.0.0.0
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      DATABASE_URL: postgresql://barkeep:barkeep@db:5432/barkeep?schema=public
+      CHRONICLER_REC_PATH: /app/rec
+      NODE_ENV: production
+    ports:
+      # Exposed for local curl testing. In Dokploy you'll typically route via
+      # Traefik instead; can be removed once Chronicler is talking to us
+      # internally over the shared network.
+      - '3001:3001'
+    volumes:
+      # Read-only mount of Chronicler's recording volume. See note at top.
+      - 'craig_rec:/app/rec:ro'
+    healthcheck:
+      test: ['CMD', 'node', '-e', "require('http').get('http://127.0.0.1:3001/health', r => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  barkeep_db:
+  craig_rec:
+    external: true
+    # Override at deploy time via env or hard-code here once you know the
+    # real name in Dokploy. Example: name: chronicler-abc123_craig_rec
+    name: ${CRAIG_REC_VOLUME:-craig_rec}
+
+networks:
+  default:
+    # Join Chronicler's network so Chronicler can resolve `barkeep:3001`.
+    # Set CHRONICLER_NETWORK in Dokploy to the real network name (e.g.
+    # `chronicler-abc123_default`). Falls back to a stack-local network when
+    # unset so local-dev still works.
+    name: ${CHRONICLER_NETWORK:-barkeep_default}
+    external: ${CHRONICLER_NETWORK_EXTERNAL:-false}
