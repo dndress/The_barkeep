@@ -25,11 +25,15 @@ COPY src ./src
 COPY vendor ./vendor
 RUN npx prisma generate
 RUN npx tsc -p .
-# Compile cook helpers. buildCook.sh does `gcc -O3 -o name name.c` for each
-# *.c in cook/. Output binaries land alongside the .c sources.
-RUN chmod +x vendor/cook.sh vendor/buildCook.sh && \
-    sh vendor/buildCook.sh && \
-    ls -la vendor/cook/ | head -30
+# Compile cook helpers. Inline equivalent of Craig's buildCook.sh, minus the
+# SVG-to-PNG inkscape step we don't need. buildCook.sh assumes Craig's
+# directory layout (scripts/ + cook/ siblings); since we put cook.sh and
+# cook/ both inside vendor/, doing the gcc loop directly is simpler and
+# avoids the bad cd path.
+RUN chmod +x vendor/cook.sh && \
+    cd vendor/cook && \
+    for i in *.c; do gcc -O3 -o "${i%.c}" "$i" || exit 1; done && \
+    ls -la /app/vendor/cook/ | head -30
 
 FROM node:20-bookworm-slim AS runtime
 WORKDIR /app
