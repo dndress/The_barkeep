@@ -1,0 +1,316 @@
+// Barkeep Prisma schema.
+//
+// Conventions:
+//   - All IDs are UUIDs (cuid would also work; UUID chosen because it plays
+//     nicely with external systems if we ever export).
+//   - All Discord IDs are strings (Discord snowflakes overflow JS Number).
+//   - `discord_*` columns store Discord IDs/usernames; `display_name` stores
+//     the real human name from the seed file and is never overwritten.
+//   - Embeddings use pgvector. We enable the extension via the previewFeature
+//     + custom migration SQL — Prisma can't manage the type natively yet.
+//
+// Stage 2 scope:
+//   - Static reference (Campaign, User, Character) is seeded
+//   - Session + Chapter persistence wired into the webhook handler
+//   - All downstream tables (AudioFile, Transcript, Chunk, Summary,
+//     CharacterMemory, ArtPiece, SessionPlayer) are defined now so future
+//     stages only add code, not migrations
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  extensions = [vector]
+}
+
+// ============================================================================
+// Static reference data — seeded from prisma/seed.ts
+// ============================================================================
+
+enum GameSystem {
+  DND_5E   @map("dnd_5e")
+  PF2E     @map("pf2e")
+}
+
+model Campaign {
+  id                     String     @id @default(uuid())
+  name                   String
+  gameSystem             GameSystem @map("game_system")
+  // Where the Barkeep posts recaps and listens for /ask. Voice channel is
+  // NOT recorded here — there's one shared voice channel across all
+  // campaigns, so we identify the campaign from the voice intro instead.
+  discordTextChannelId   String     @unique @map("discord_text_channel_id")
+  discordGuildId         String     @map("discord_guild_id")
+  active                 Boolean    @default(true)
+  // Optional flavor for the Barkeep persona. Left null at seed time — the
+  // bot is intended to build flavor from interactions over time.
+  personaFlavor          String?    @map("persona_flavor")
+  createdAt              DateTime   @default(now()) @map("created_at")
+
+  characters     Character[]
+  sessions       Session[]
+
+  @@unique([discordGuildId, name])
+  @@map("campaigns")
+}
+
+model User {
+  id                String   @id @default(uuid())
+  // Discord snowflake. THE stable key — usernames change.
+  discordUserId     String   @unique @map("discord_user_id")
+  // Current Discord username. Refreshed on every webhook (cheap, accurate).
+  discordUsername   String   @map("discord_username")
+  // Real human name from the seed file. NEVER overwritten by webhook data.
+  displayName       String   @map("display_name")
+  createdAt         DateTime @default(now()) @map("created_at")
+
+  characters     Character[]
+  sessionsAsDm   Session[]        @relation("DmUser")
+  sessionPlayers SessionPlayer[]
+  audioFiles     AudioFile[]
+  chunks         Chunk[]
+
+  @@map("users")
+}
+
+model Character {
+  id           String   @id @default(uuid())
+  campaignId   String   @map("campaign_id")
+  userId       String   @map("user_id")
+  name         String
+  race         String?
+  classOrRole  String?  @map("class_or_role")
+  // Free-text personality the Barkeep can lean into. Often null at seed
+  // time — populated by the user or learned over time.
+  personality  String?
+  voiceNotes   String?  @map("voice_notes")
+  active       Boolean  @default(true)
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  campaign       Campaign         @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  user           User             @relation(fields: [userId], references: [id], onDelete: Restrict)
+  sessionPlayers SessionPlayer[]
+  chunks         Chunk[]
+  memories       CharacterMemory[]
+
+  @@unique([campaignId, name])
+  @@map("characters")
+}
+
+// ============================================================================
+// Recording / transcription pipeline
+// ============================================================================
+
+enum SessionStatus {
+  RECEIVING    @map("receiving")
+  COOKING      @map("cooking")
+  TRANSCRIBING @map("transcribing")
+  SUMMARIZING  @map("summarizing")
+  READY        @map("ready")
+  POSTED       @map("posted")
+  NEEDS_REVIEW @map("needs_review")
+  FAILED       @map("failed")
+}
+
+enum CampaignDetectionMethod {
+  VOICE_INTRO @map("voice_intro")
+  MANUAL_TAG  @map("manual_tag")
+}
+
+model Session {
+  id                  String                   @id @default(uuid())
+  // Chronicler's recording ID — webhook key. UNIQUE so re-fire of the first
+  // chapter is idempotent (we look up the session by this).
+  recordingId         String                   @unique @map("recording_id")
+  // Filled in once the campaign detection step runs (voice intro).
+  campaignId          String?                  @map("campaign_id")
+  // Per-campaign auto-incrementing session number. Filled when campaignId is.
+  sessionNumber       Int?                     @map("session_number")
+  // Detected from the DM's intro track. Nullable until detection runs.
+  dmUserId            String?                  @map("dm_user_id")
+  discordGuildId      String                   @map("discord_guild_id")
+  // Voice channel where Chronicler recorded — captured but NOT used to
+  // identify the campaign (since voice channel is shared).
+  discordVoiceChannelId String                 @map("discord_voice_channel_id")
+  startedAt           DateTime                 @map("started_at")
+  // Filled when the final chapter arrives.
+  endedAt             DateTime?                @map("ended_at")
+  status              SessionStatus            @default(RECEIVING)
+  recapScheduledFor   DateTime?                @map("recap_scheduled_for")
+  recapPostedAt       DateTime?                @map("recap_posted_at")
+  detectionMethod     CampaignDetectionMethod? @map("detection_method")
+  createdAt           DateTime                 @default(now()) @map("created_at")
+  updatedAt           DateTime                 @updatedAt @map("updated_at")
+
+  campaign       Campaign?         @relation(fields: [campaignId], references: [id])
+  dm             User?             @relation("DmUser", fields: [dmUserId], references: [id])
+  chapters       Chapter[]
+  sessionPlayers SessionPlayer[]
+  chunks         Chunk[]
+  summary        Summary?
+  memories       CharacterMemory[]
+  artPieces      ArtPiece[]
+
+  @@unique([campaignId, sessionNumber])
+  @@map("sessions")
+}
+
+model Chapter {
+  id            String    @id @default(uuid())
+  sessionId     String    @map("session_id")
+  chapterIndex  Int       @map("chapter_index")
+  isFinal       Boolean   @map("is_final")
+  startedAt     DateTime  @map("started_at")
+  endedAt       DateTime  @map("ended_at")
+  // Absolute paths inside the shared craig_rec volume. We keep them so a
+  // failed cook can be re-run without re-receiving the webhook.
+  rawDataPath    String   @map("raw_data_path")
+  rawHeader1Path String   @map("raw_header1_path")
+  rawHeader2Path String   @map("raw_header2_path")
+  rawUsersPath   String   @map("raw_users_path")
+  rawInfoPath    String   @map("raw_info_path")
+  receivedAt    DateTime  @default(now()) @map("received_at")
+  processedAt   DateTime? @map("processed_at")
+
+  session    Session     @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  audioFiles AudioFile[]
+  chunks     Chunk[]
+
+  @@unique([sessionId, chapterIndex])
+  @@map("chapters")
+}
+
+// Captures who was in a given session and which character they brought. The
+// voice-intro extractor writes one row per track after transcription.
+enum SessionRole {
+  DM     @map("dm")
+  PLAYER @map("player")
+}
+
+model SessionPlayer {
+  sessionId         String      @map("session_id")
+  userId            String      @map("user_id")
+  characterId       String?     @map("character_id")
+  role              SessionRole
+  trackIndex        Int         @map("track_index")
+  detectedFromVoice Boolean     @default(false) @map("detected_from_voice")
+
+  session   Session    @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  user      User       @relation(fields: [userId], references: [id])
+  character Character? @relation(fields: [characterId], references: [id])
+
+  @@id([sessionId, userId])
+  @@map("session_players")
+}
+
+model AudioFile {
+  id            String    @id @default(uuid())
+  chapterId     String    @map("chapter_id")
+  userId        String?   @map("user_id")
+  trackIndex    Int       @map("track_index")
+  cookedPath    String    @map("cooked_path")
+  format        String    @default("flac")
+  durationSec   Int?      @map("duration_sec")
+  fileSizeBytes BigInt?   @map("file_size_bytes")
+  cookedAt      DateTime  @default(now()) @map("cooked_at")
+  processed     Boolean   @default(false)
+
+  chapter    Chapter     @relation(fields: [chapterId], references: [id], onDelete: Cascade)
+  user       User?       @relation(fields: [userId], references: [id])
+  transcript Transcript?
+
+  @@unique([chapterId, trackIndex])
+  @@map("audio_files")
+}
+
+model Transcript {
+  id              String   @id @default(uuid())
+  audioFileId     String   @unique @map("audio_file_id")
+  fullText        String   @map("full_text")
+  language        String?
+  geminiRequestId String?  @map("gemini_request_id")
+  transcribedAt   DateTime @default(now()) @map("transcribed_at")
+
+  audioFile AudioFile @relation(fields: [audioFileId], references: [id], onDelete: Cascade)
+
+  @@map("transcripts")
+}
+
+model Chunk {
+  id          String   @id @default(uuid())
+  sessionId   String   @map("session_id")
+  chapterId   String   @map("chapter_id")
+  userId      String?  @map("user_id")
+  characterId String?  @map("character_id")
+  text        String
+  tsStartSec  Int      @map("ts_start_sec")
+  tsEndSec    Int      @map("ts_end_sec")
+  // pgvector column. 768 dims matches Gemini text-embedding-004.
+  embedding   Unsupported("vector(768)")?
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  session   Session    @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  chapter   Chapter    @relation(fields: [chapterId], references: [id], onDelete: Cascade)
+  user      User?      @relation(fields: [userId], references: [id])
+  character Character? @relation(fields: [characterId], references: [id])
+
+  @@index([sessionId])
+  @@map("chunks")
+}
+
+model Summary {
+  id           String   @id @default(uuid())
+  sessionId    String   @unique @map("session_id")
+  short        String
+  full         String
+  keyEvents    Json     @map("key_events")
+  generatedAt  DateTime @default(now()) @map("generated_at")
+
+  session Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@map("summaries")
+}
+
+enum MemoryKind {
+  DEED         @map("deed")
+  QUOTE        @map("quote")
+  RELATIONSHIP @map("relationship")
+  WOUND        @map("wound")
+  QUIRK        @map("quirk")
+}
+
+model CharacterMemory {
+  id          String     @id @default(uuid())
+  characterId String     @map("character_id")
+  sessionId   String     @map("session_id")
+  kind        MemoryKind
+  content     String
+  // 1–10. Drives the pruning policy (≤3 archive after 5 sessions; 4–6 after
+  // 15; 7+ never).
+  importance  Int
+  archived    Boolean    @default(false)
+  archivedAt  DateTime?  @map("archived_at")
+  createdAt   DateTime   @default(now()) @map("created_at")
+
+  character Character @relation(fields: [characterId], references: [id], onDelete: Cascade)
+  session   Session   @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([characterId, archived])
+  @@map("character_memory")
+}
+
+model ArtPiece {
+  id        String   @id @default(uuid())
+  sessionId String   @map("session_id")
+  prompt    String
+  filePath  String?  @map("file_path")
+  posted    Boolean  @default(false)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  session Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@map("art_pieces")
+}

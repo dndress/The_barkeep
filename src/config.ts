@@ -12,8 +12,9 @@ const Env = z.object({
   HOST: z.string().default('0.0.0.0'),
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),
 
-  // Optional in stage 1; we'll require it in stage 2 when Prisma comes in.
-  DATABASE_URL: z.string().url().optional(),
+  // Required as of stage 2 — Prisma client needs it. Format:
+  // postgresql://user:pass@host:5432/dbname?schema=public
+  DATABASE_URL: z.string().url(),
 
   // Optional; read by later stages when we cook raw artifacts.
   CHRONICLER_REC_PATH: z.string().default('/app/rec'),

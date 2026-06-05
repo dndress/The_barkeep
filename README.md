@@ -4,36 +4,44 @@ D&D / Pathfinder session summarizer + RAG bot. Pairs with the Chronicler (a Crai
 
 This repo contains the Barkeep service only. Chronicler lives in its own repo.
 
-## Stage 1 — what works today
+## Stages
 
-- Fastify server exposing `POST /api/recordings/complete`
-- Validates `X-Webhook-Secret` against `BARKEEP_WEBHOOK_SECRET`
-- Validates payload shape against the Chronicler handoff contract (v2)
-- Logs accepted payloads, returns `202 Accepted`
-- Postgres 17 + pgvector container running (empty — schema lands in Stage 2)
-- Docker Compose set up for Dokploy alongside Chronicler
+**Stage 1 (done):** Fastify server exposing `POST /api/recordings/complete`, secret + payload validation, Postgres 17 + pgvector container, Docker Compose set up for Dokploy alongside Chronicler.
 
-Not implemented yet: Prisma schema, job queue, cook runner, Gemini transcription/summarization/embedding, Discord bot, recap scheduler.
+**Stage 2 (done):** Prisma schema covering all eventual tables, idempotent seed of 2 campaigns + 9 users + 16 characters + channel mappings, `prisma db push` on container boot, webhook handler now persists `Session` + `Chapter` rows.
+
+**Not yet:** cook runner, Gemini transcription/summarization/embedding, voice-intro extractor, Discord bot, recap scheduler.
 
 ## Repo layout
 
 ```
-barkeep/
+The_barkeep/
+├── prisma/
+│   ├── schema.prisma     # full data model (12 tables)
+│   └── seed.ts           # idempotent reference-data seed
 ├── src/
-│   ├── index.ts         # entrypoint
-│   ├── config.ts        # env loading + validation (zod)
-│   ├── logger.ts        # pino logger factory
-│   ├── server.ts        # Fastify app factory
+│   ├── index.ts          # entrypoint + signal handling
+│   ├── config.ts         # env loading + validation (zod)
+│   ├── logger.ts         # pino logger options factory
+│   ├── server.ts         # Fastify app factory
+│   ├── db.ts             # PrismaClient singleton
 │   └── webhook/
-│       ├── schema.ts    # zod schema for Chronicler payload (v2)
-│       └── route.ts     # POST /api/recordings/complete handler
-├── Dockerfile           # multi-stage build (deps → tsc → runtime)
-├── docker-compose.yml   # db + barkeep, with shared craig_rec volume
+│       ├── schema.ts     # zod schema for Chronicler payload (v2)
+│       └── route.ts      # POST /api/recordings/complete handler
+├── Dockerfile            # multi-stage; prisma generate + tsc → runtime
+├── docker-compose.yml    # barkeep-db + barkeep, shared craig_rec volume
+├── entrypoint.sh         # prisma db push → seed → exec node
 ├── package.json
 ├── tsconfig.json
 ├── .env.example
 └── README.md
 ```
+
+## Schema sync philosophy
+
+We use `prisma db push` (not tracked migrations) on every container boot. It's idempotent and additive-only by default — refuses destructive changes without `--accept-data-loss`, which we deliberately don't pass. For a single-developer hobby project this is the right trade: zero migration bookkeeping, schema always matches `schema.prisma`. If we ever need rollback or multi-env divergence we can add `prisma migrate` later.
+
+The seed runs after every push (also idempotent — upserts on Discord IDs and (campaign, character-name) composites). New campaigns and characters are added by editing `prisma/seed.ts` and redeploying.
 
 ## Run locally
 
@@ -73,13 +81,60 @@ curl -i -X POST http://localhost:3001/api/recordings/complete \
   }'
 ```
 
-Expected: `HTTP/1.1 202 Accepted` with `{"status":"accepted"}` and a `chronicler webhook accepted` log line in the container output.
+Expected: `HTTP/1.1 202 Accepted` with `{"status":"accepted","sessionId":"…","chapterId":"…"}` and a `chronicler webhook persisted` log line.
 
 Sanity checks worth running:
 
 - Bad secret → `401 unauthorized`
 - Missing field (e.g. drop `endedAt`) → `400 invalid payload` with zod issues
 - Body over 64KB → Fastify rejects before our handler runs
+
+## Stage 2 verification checklist
+
+After deploying Stage 2, run these against the VPS host (Hostinger SSH shell):
+
+```bash
+# 1. Confirm seed ran — should print 2 campaigns / 9 users / 16 characters
+docker exec -it $(docker ps -qf name=barkeep-db) \
+  psql -U barkeep -d barkeep -c \
+  "SELECT (SELECT count(*) FROM campaigns) AS campaigns,
+          (SELECT count(*) FROM users) AS users,
+          (SELECT count(*) FROM characters) AS characters;"
+
+# 2. Fire two webhooks for the same recording — chapter 0 (non-final) then chapter 1 (final)
+SECRET="<your secret>"
+
+curl -s -X POST http://localhost:3001/api/recordings/complete \
+  -H "Content-Type: application/json" \
+  -H "X-Webhook-Secret: $SECRET" \
+  -d '{"recordingId":"verify-002","chapterIndex":0,"isFinalChapter":false,"discordGuildId":"698633790972493855","discordChannelId":"1234567890","startedAt":"2026-06-04T19:00:00Z","endedAt":"2026-06-04T20:00:00Z","rawFiles":{"data":"a","header1":"b","header2":"c","users":"d","info":"e"}}'
+echo
+
+curl -s -X POST http://localhost:3001/api/recordings/complete \
+  -H "Content-Type: application/json" \
+  -H "X-Webhook-Secret: $SECRET" \
+  -d '{"recordingId":"verify-002","chapterIndex":1,"isFinalChapter":true,"discordGuildId":"698633790972493855","discordChannelId":"1234567890","startedAt":"2026-06-04T20:00:00Z","endedAt":"2026-06-04T23:00:00Z","rawFiles":{"data":"a","header1":"b","header2":"c","users":"d","info":"e"}}'
+echo
+
+# 3. Confirm one session + two chapters landed, and final ended_at is set
+docker exec -it $(docker ps -qf name=barkeep-db) \
+  psql -U barkeep -d barkeep -c \
+  "SELECT s.recording_id, s.status, s.ended_at, s.recap_scheduled_for,
+          (SELECT count(*) FROM chapters c WHERE c.session_id = s.id) AS chapter_count
+   FROM sessions s WHERE s.recording_id = 'verify-002';"
+# Expect: chapter_count=2, ended_at set, recap_scheduled_for = ended_at + 10h
+
+# 4. Idempotency check — replay chapter 1, expect still 2 chapters total
+curl -s -X POST http://localhost:3001/api/recordings/complete \
+  -H "Content-Type: application/json" -H "X-Webhook-Secret: $SECRET" \
+  -d '{"recordingId":"verify-002","chapterIndex":1,"isFinalChapter":true,"discordGuildId":"698633790972493855","discordChannelId":"1234567890","startedAt":"2026-06-04T20:00:00Z","endedAt":"2026-06-04T23:00:00Z","rawFiles":{"data":"a","header1":"b","header2":"c","users":"d","info":"e"}}'
+docker exec -it $(docker ps -qf name=barkeep-db) \
+  psql -U barkeep -d barkeep -c \
+  "SELECT count(*) FROM chapters WHERE session_id IN (SELECT id FROM sessions WHERE recording_id = 'verify-002');"
+# Expect: 2
+```
+
+All four should pass on a clean deploy. If `campaigns` returns 0, the seed didn't run — check Barkeep container boot logs for `[entrypoint] running seed...`.
 
 ## Deploy via Dokploy alongside Chronicler
 
@@ -102,4 +157,4 @@ BARKEEP_WEBHOOK_SECRET=<same value as the Barkeep stack's .env>
 
 ## Next stage
 
-Stage 2: Prisma schema + initial migration covering campaigns, users, characters, sessions, chapters, and a seed script that loads the campaigns + players from `Discord_Players_Data.txt`. Webhook handler will start persisting chapter rows.
+Stage 3: bundle Craig's `cook` binary into the runtime image; pipeline worker pops new chapters, cooks per-track FLAC files into `audio_files`, and stages them for Gemini File API upload. No transcription yet — Stage 3 just gets us from "chapters in DB" to "cooked tracks on disk with rows in `audio_files`."
