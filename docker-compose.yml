@@ -48,7 +48,10 @@ services:
       PORT: 3001
       HOST: 0.0.0.0
       LOG_LEVEL: ${LOG_LEVEL:-info}
-      DATABASE_URL: postgresql://barkeep:barkeep@barkeep-db:5432/barkeep?schema=public
+      # connection_limit + pool_timeout: defaults (5 / 10s) are tight enough
+      # that a single slow query under bursty load can starve the worker.
+      # 20 / 30s gives breathing room without stressing pg17.
+      DATABASE_URL: postgresql://barkeep:barkeep@barkeep-db:5432/barkeep?schema=public&connection_limit=20&pool_timeout=30
       CHRONICLER_REC_PATH: /app/rec
       NODE_ENV: production
     ports:
