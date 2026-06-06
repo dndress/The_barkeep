@@ -1,63 +1,86 @@
-// Single-AudioFile transcription against the Gemini File API.
+// Single-AudioFile transcription against the Gemini File API, Stage 4.5.
+//
+// Difference from Stage 4: we now request structured JSON output containing
+// per-utterance segments with timestamps, not just a flat text blob. This
+// lets the Stage 5 summarizer interleave multiple tracks by wall-clock
+// time and reconstruct chronological event order across speakers.
+//
+// Output schema (enforced via Gemini's responseSchema):
+//   {
+//     "segments": [
+//       { "start": <number, seconds from chapter start>, "text": "<verbatim>" },
+//       ...
+//     ]
+//   }
 //
 // Flow:
 //   1. Upload the cooked FLAC.
-//   2. Poll until the uploaded file's state is ACTIVE (usually a few seconds).
-//   3. Call gemini-2.5-flash with the file + a Spanish-primary prompt.
-//   4. Extract response text.
-//   5. Delete the uploaded file regardless of success/failure (we have a 48h
-//      auto-expiry as a safety net, but explicit cleanup is friendlier to
-//      the player's free-tier File API storage quota).
-//
-// On any failure we throw — the caller (worker.ts) catches, increments
-// transcribeAttempts, stores the error, and decides whether to retry.
-import { createPartFromUri, createUserContent } from '@google/genai';
+//   2. Poll until ACTIVE.
+//   3. Call gemini-2.5-flash with structured-output config.
+//   4. Validate the JSON shape with zod.
+//   5. Derive `fullText` by joining segment text with spaces.
+//   6. Always delete the uploaded file.
+import { createPartFromUri, createUserContent, Type } from '@google/genai';
 import path from 'node:path';
+import { z } from 'zod';
 
 import { getGemini } from './gemini.js';
 
 export interface TranscribeOptions {
-  /** Absolute path to the FLAC file on disk. */
   filePath: string;
-  /** Model id, e.g. 'gemini-2.5-flash'. */
   model: string;
-  /** Two-letter primary language hint (e.g. 'es'). Embedded into the prompt. */
   languageHint: string;
-  /** Hard cap on total time across upload + poll + generate, in ms. */
   timeoutMs: number;
 }
 
-export interface TranscribeResult {
-  /** Full transcript text — no speaker labels, no timestamps, no commentary. */
+export interface TranscribeSegment {
+  /** Seconds from the start of the audio file, fractional allowed. */
+  start: number;
+  /** Verbatim transcript text for this utterance. */
   text: string;
-  /** Gemini response id for audit / debugging. */
+}
+
+export interface TranscribeResult {
+  /** Joined text of all segments — used wherever we need a flat string. */
+  fullText: string;
+  /** Structured segments. May be empty if the audio had no detected speech. */
+  segments: TranscribeSegment[];
   responseId?: string;
-  /** Detected language code if Gemini returns one in usage metadata. */
   language?: string;
 }
 
 const FLAC_MIME = 'audio/flac';
 
+const SegmentSchema = z.object({
+  start: z.number().nonnegative().finite(),
+  text: z.string()
+});
+const ResponseSchema = z.object({
+  segments: z.array(SegmentSchema)
+});
+
 function buildPrompt(languageHint: string): string {
-  // System-prompt style content. The audio comes immediately before this
-  // text in the request, so "this audio" refers unambiguously to the file.
+  const langName = languageHint === 'es' ? 'Spanish' : languageHint;
   return [
-    'Transcribe the audio above verbatim.',
+    'Transcribe the audio above as a list of speech segments, in time order.',
     '',
     'Context:',
-    `- The primary spoken language is ${languageHint === 'es' ? 'Spanish' : languageHint}.`,
-    '- Some words are in English: character names, spell names, monster names,',
-    '  D&D / Pathfinder mechanics terms, and direct character-sheet readouts.',
-    '- The speaker is one player in a tabletop RPG session — only their voice is on this track.',
+    `- Primary spoken language: ${langName}.`,
+    '- Some words are English: character names, spell names, monster names,',
+    '  D&D / Pathfinder mechanics terms, direct character-sheet readouts.',
+    '- The audio contains exactly one speaker — only their voice is on this track.',
+    '- There may be long silent gaps; do not invent speech for silence.',
     '',
-    'Output rules:',
-    '- Output ONLY the transcript text. Nothing else.',
-    '- No speaker labels (no "Player:" or names).',
-    '- No timestamps.',
-    '- No "[inaudible]" or similar — if a segment is unclear, transcribe your best guess.',
-    '- Preserve the original language of each word. Do not translate.',
-    '- Use standard punctuation.',
-    '- If the audio is silent or contains no speech, output an empty string and nothing else.'
+    'Output format: JSON matching the supplied schema.',
+    '- Each segment is one natural utterance (sentence or clear pause boundary).',
+    '- `start` is the number of seconds from the beginning of THIS audio file.',
+    '  Be accurate — derive from the audio, do not estimate from prose length.',
+    '- `text` is the verbatim transcript for that segment.',
+    '- Preserve original language per word — do NOT translate to English.',
+    '- No speaker labels in `text`. No timestamps embedded in `text`.',
+    '- Standard punctuation.',
+    '- If a segment is unclear, transcribe your best guess (no [inaudible]).',
+    '- If the file has no speech at all, return { "segments": [] }.'
   ].join('\n');
 }
 
@@ -75,19 +98,25 @@ async function waitForActive(fileName: string, timeoutMs: number): Promise<void>
       throw new Error(`Gemini File API file ${fileName} did not become ACTIVE within ${timeoutMs}ms (last state: ${file.state})`);
     }
     await new Promise((resolve) => setTimeout(resolve, delay));
-    // Exponential-ish backoff capped at 5s to avoid hammering the API.
     delay = Math.min(delay * 2, 5000);
   }
 }
 
+function joinSegments(segments: TranscribeSegment[]): string {
+  return segments
+    .map((s) => s.text.trim())
+    .filter((s) => s.length > 0)
+    .join(' ');
+}
+
 /**
- * Upload, transcribe, and tear down. Throws on any failure step.
+ * Upload, transcribe with structured timestamped output, tear down.
+ * Throws on any failure.
  */
 export async function transcribeAudioFile(opts: TranscribeOptions): Promise<TranscribeResult> {
   const ai = getGemini();
   const displayName = path.basename(opts.filePath);
 
-  // 1. Upload
   const uploaded = await ai.files.upload({
     file: opts.filePath,
     config: {
@@ -95,23 +124,18 @@ export async function transcribeAudioFile(opts: TranscribeOptions): Promise<Tran
       displayName
     }
   });
-
   if (!uploaded.name) {
     throw new Error('Gemini File API returned an upload without a `name` — cannot proceed');
   }
-
   const fileName = uploaded.name;
   const fileUri = uploaded.uri;
 
   try {
-    // 2. Wait for ACTIVE
     await waitForActive(fileName, Math.min(60_000, opts.timeoutMs / 4));
-
     if (!fileUri) {
       throw new Error(`Gemini File API uploaded file ${fileName} has no URI after becoming ACTIVE`);
     }
 
-    // 3. Generate
     const response = await ai.models.generateContent({
       model: opts.model,
       contents: [
@@ -121,35 +145,71 @@ export async function transcribeAudioFile(opts: TranscribeOptions): Promise<Tran
         ])
       ],
       config: {
-        // Verbatim transcription should not "hallucinate" plausible text.
-        // Temperature 0 + no topP/topK gives the model the least room to
-        // get creative.
-        temperature: 0
+        temperature: 0,
+        responseMimeType: 'application/json',
+        // Constrain the model to the segments shape so we don't have to
+        // defend against prose wrappers or markdown fences.
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            segments: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  start: { type: Type.NUMBER },
+                  text: { type: Type.STRING }
+                },
+                required: ['start', 'text']
+              }
+            }
+          },
+          required: ['segments']
+        }
       }
     });
 
-    const text = (response.text ?? '').trim();
+    const rawText = response.text ?? '';
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(rawText);
+    } catch (e) {
+      const sample = rawText.slice(0, 300);
+      throw new Error(
+        `Gemini returned non-JSON output despite responseSchema. First 300 chars: ${sample}`
+      );
+    }
+
+    const validated = ResponseSchema.safeParse(parsed);
+    if (!validated.success) {
+      const issues = validated.error.issues
+        .map((i) => `${i.path.join('.')}: ${i.message}`)
+        .join('; ');
+      throw new Error(`Gemini response failed schema validation: ${issues}`);
+    }
+
+    // Sort by start in case the model returned them out of order. Defensive
+    // — usually they're already in order — but doesn't cost much.
+    const segments = validated.data.segments
+      .slice()
+      .sort((a, b) => a.start - b.start);
+
+    const fullText = joinSegments(segments);
     const responseId =
       (response as unknown as { responseId?: string }).responseId ??
       (response as unknown as { id?: string }).id;
 
     return {
-      text,
+      fullText,
+      segments,
       responseId,
-      // The SDK doesn't expose a language field directly; we rely on the
-      // hint we passed in. Future: extract from usageMetadata if available.
       language: opts.languageHint
     };
   } finally {
-    // 4. Always try to delete the uploaded file. Failure to delete is
-    // non-fatal (48h auto-expiry will catch it), but we log via thrown
-    // suppression so the worker can decide.
     try {
       await ai.files.delete({ name: fileName });
     } catch {
-      // Swallowed — the cleanup attempt failing doesn't change the
-      // transcription outcome and we don't want to mask a real error
-      // from the generateContent call above.
+      // Non-fatal; auto-expires in 48h.
     }
   }
 }

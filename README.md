@@ -14,6 +14,8 @@ This repo contains the Barkeep service only. Chronicler lives in its own repo.
 
 **Stage 4 (done):** `@google/genai` SDK integrated. The worker now also transcribes every cooked `AudioFile` via `gemini-2.5-flash` (Spanish-primary prompt, English allowed for proper nouns / spell names / etc.), writes `Transcript` rows, and advances `Session.status` from `COOKING → TRANSCRIBING → READY` when every chapter is cooked AND every track is transcribed. Up to 2 transcriptions run in parallel; failures retry up to 3 times then park with the error stored on `AudioFile.transcribe_error`.
 
+**Stage 4.5 (done):** Transcription output is now **structured segments** with per-utterance timestamps, not a flat text blob. Each `Transcript` now has a `segments` JSON column of `[{start: number, text: string}]` (seconds from the start of the chapter's audio). The Stage 5 summarizer will use these to interleave tracks chronologically across speakers. `fullText` is still derived (joined from segments) for backward compatibility and quick reads.
+
 **Not yet:** summarization/embedding, voice-intro extractor, Discord bot, recap scheduler.
 
 ## Repo layout
@@ -264,6 +266,32 @@ sudo docker exec -it $(sudo docker ps -qf name=barkeep-db) \
    WHERE transcribe_attempts > 0 OR transcribe_error IS NOT NULL;"
 # Expect: empty in happy path
 ```
+
+## Re-transcribing existing data with segments (Stage 4.5)
+
+`Transcript` rows from before Stage 4.5 have `segments = NULL`. To re-transcribe them with the new structured output (so Stage 5 can use timing info):
+
+```bash
+# Wipe just the transcripts — leaves AudioFile rows and cooked FLAC files intact.
+sudo docker exec -it $(sudo docker ps -qf name=barkeep-db) \
+  psql -U barkeep -d barkeep -c \
+  "DELETE FROM transcripts;
+   UPDATE audio_files SET transcribe_attempts = 0, transcribe_error = NULL;
+   UPDATE sessions SET status = 'TRANSCRIBING' WHERE status IN ('READY', 'FAILED');"
+```
+
+Worker picks them up on the next tick. Verify the new shape landed:
+
+```bash
+sudo docker exec -it $(sudo docker ps -qf name=barkeep-db) \
+  psql -U barkeep -d barkeep -c \
+  "SELECT t.id, jsonb_array_length(t.segments) AS segment_count,
+          (t.segments -> 0 ->> 'start')::float AS first_start,
+          substring(t.segments -> 0 ->> 'text', 1, 100) AS first_text
+   FROM transcripts t ORDER BY t.transcribed_at DESC LIMIT 5;"
+```
+
+Expect: `segment_count > 0`, `first_start` is a small number of seconds, `first_text` is real Spanish.
 
 ## Retrying failed transcriptions
 

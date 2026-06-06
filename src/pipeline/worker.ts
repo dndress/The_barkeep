@@ -299,7 +299,11 @@ async function transcribeOne(
       prisma.transcript.create({
         data: {
           audioFileId,
-          fullText: result.text,
+          fullText: result.fullText,
+          // Cast: Prisma Json type accepts any JSON-serializable value at
+          // runtime; the segments shape is validated by zod inside
+          // transcribeAudioFile so we know it's safe here.
+          segments: result.segments as unknown as object,
           language: result.language,
           geminiRequestId: result.responseId
         }
@@ -310,7 +314,12 @@ async function transcribeOne(
       })
     ]);
     log.info(
-      { audioFileId, charCount: result.text.length, language: result.language },
+      {
+        audioFileId,
+        charCount: result.fullText.length,
+        segmentCount: result.segments.length,
+        language: result.language
+      },
       'audio file transcribed'
     );
   } catch (err) {

@@ -235,6 +235,12 @@ model Transcript {
   id              String   @id @default(uuid())
   audioFileId     String   @unique @map("audio_file_id")
   fullText        String   @map("full_text")
+  // Structured timestamped output from Gemini. Shape:
+  //   [{ "start": <seconds from chapter start>, "text": "<utterance>" }, ...]
+  // Nullable so transcripts from before Stage 4.5 don't break — when null
+  // we fall back to fullText with no timing data (worse summaries, but
+  // we don't lose data).
+  segments        Json?
   language        String?
   geminiRequestId String?  @map("gemini_request_id")
   transcribedAt   DateTime @default(now()) @map("transcribed_at")
