@@ -54,6 +54,16 @@ services:
       DATABASE_URL: postgresql://barkeep:barkeep@barkeep-db:5432/barkeep?schema=public&connection_limit=20&pool_timeout=30
       CHRONICLER_REC_PATH: /app/rec
       NODE_ENV: production
+      # Stage 4 — Gemini transcription. The API key is the only one that's
+      # actually required; the rest are tunables with sensible defaults in
+      # config.ts. We pass them through anyway so Dokploy's Environment tab
+      # can override them without code changes.
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      TRANSCRIBE_MODEL: ${TRANSCRIBE_MODEL:-gemini-2.5-flash}
+      TRANSCRIBE_LANGUAGE_HINT: ${TRANSCRIBE_LANGUAGE_HINT:-es}
+      TRANSCRIBE_CONCURRENCY: ${TRANSCRIBE_CONCURRENCY:-2}
+      TRANSCRIBE_MAX_ATTEMPTS: ${TRANSCRIBE_MAX_ATTEMPTS:-3}
+      TRANSCRIBE_TIMEOUT_MS: ${TRANSCRIBE_TIMEOUT_MS:-1200000}
     ports:
       # Exposed for local curl testing. In Dokploy you'll typically route via
       # Traefik instead; can be removed once Chronicler is talking to us

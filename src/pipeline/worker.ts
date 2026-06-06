@@ -65,9 +65,13 @@ export function startWorker(config: WorkerConfig, log: FastifyBaseLogger): Worke
           if (stopped) return;
         }
 
-        // 2. Drain transcribe queue (parallel up to transcribeConcurrency)
+        // 2. Drain transcribe queue (parallel up to transcribeConcurrency).
+        // Track IDs already touched this tick so a failing file doesn't
+        // burn all 3 attempts in milliseconds — bad files get one shot per
+        // tick (30s) rather than three in a row.
+        const triedThisTick = new Set<string>();
         for (let i = 0; i < 25; i++) {
-          const processed = await processTranscribeBatch(config, log);
+          const processed = await processTranscribeBatch(config, log, triedThisTick);
           if (!processed) break;
           if (stopped) return;
         }
@@ -234,15 +238,22 @@ interface TranscribeJob {
   chapter: { sessionId: string };
 }
 
-async function processTranscribeBatch(config: WorkerConfig, log: FastifyBaseLogger): Promise<boolean> {
+async function processTranscribeBatch(
+  config: WorkerConfig,
+  log: FastifyBaseLogger,
+  triedThisTick: Set<string>
+): Promise<boolean> {
   const prisma = getPrisma();
   // Only consider AudioFiles whose chapter is already cooked (processedAt
   // set). transcribeAttempts caps retries; we filter at the DB level.
+  // Also exclude files we already touched this tick so failures back off
+  // to one attempt per 30s tick instead of burning the retry budget.
   const batch: TranscribeJob[] = await prisma.audioFile.findMany({
     where: {
       transcript: null,
       transcribeAttempts: { lt: config.transcribeMaxAttempts },
-      chapter: { processedAt: { not: null } }
+      chapter: { processedAt: { not: null } },
+      ...(triedThisTick.size > 0 ? { id: { notIn: Array.from(triedThisTick) } } : {})
     },
     orderBy: { cookedAt: 'asc' },
     take: config.transcribeConcurrency,
@@ -253,6 +264,7 @@ async function processTranscribeBatch(config: WorkerConfig, log: FastifyBaseLogg
     }
   });
   if (batch.length === 0) return false;
+  for (const af of batch) triedThisTick.add(af.id);
 
   // Bump status to TRANSCRIBING for any session whose AudioFile we're about
   // to touch — but only if still in COOKING (don't downgrade from READY/FAILED).
