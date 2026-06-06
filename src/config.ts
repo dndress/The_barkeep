@@ -26,6 +26,14 @@ const Env = z.object({
   WORKER_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(30_000),
   COOK_TIMEOUT_MS: z.coerce.number().int().positive().default(30 * 60 * 1000),
 
+  // Stage 4 — Gemini transcription
+  GEMINI_API_KEY: z.string().min(1).optional(),
+  TRANSCRIBE_MODEL: z.string().default('gemini-2.5-flash'),
+  TRANSCRIBE_LANGUAGE_HINT: z.string().default('es'),
+  TRANSCRIBE_CONCURRENCY: z.coerce.number().int().positive().default(2),
+  TRANSCRIBE_MAX_ATTEMPTS: z.coerce.number().int().positive().default(3),
+  TRANSCRIBE_TIMEOUT_MS: z.coerce.number().int().positive().default(20 * 60 * 1000),
+
   NODE_ENV: z.enum(['development', 'production', 'test']).default('production')
 });
 

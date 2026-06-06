@@ -20,6 +20,7 @@
     "node": ">=20.0.0"
   },
   "dependencies": {
+    "@google/genai": "^1.52.0",
     "@prisma/client": "^5.22.0",
     "fastify": "^4.28.1",
     "pino": "^9.5.0",

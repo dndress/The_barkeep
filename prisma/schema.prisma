@@ -218,6 +218,11 @@ model AudioFile {
   cookedAt      DateTime  @default(now()) @map("cooked_at")
   processed     Boolean   @default(false)
 
+  // Stage 4 (transcription) bookkeeping. We don't write a Transcript row
+  // until success, so these fields track the retry loop independently.
+  transcribeAttempts Int     @default(0) @map("transcribe_attempts")
+  transcribeError    String? @map("transcribe_error")
+
   chapter    Chapter     @relation(fields: [chapterId], references: [id], onDelete: Cascade)
   user       User?       @relation(fields: [userId], references: [id])
   transcript Transcript?

@@ -1,20 +1,31 @@
-// Background pipeline worker for Stage 3.
+// Background pipeline worker.
 //
-// Job: pop chapters where `processedAt IS NULL`, cook them into per-track
-// FLAC files, write AudioFile rows, mark the chapter processed. Polls on
-// a fixed interval (default 30s). One worker per process — fine for the
-// weekly-session cadence; if we ever need parallelism we'll add a queue.
+// One process, one tick at a time, polling every `pollIntervalMs`. Each tick
+// drains three queues in order:
 //
-// Failure handling: if cook fails we still mark `processedAt` so the worker
-// stops thrashing on the same chapter. The session moves to status FAILED
-// and the chapter is logged with `cookExitCode + cookStderr` for diagnosis.
-// To retry: `UPDATE chapters SET processed_at = NULL WHERE id = ...` then
-// poke the worker (next tick is automatic).
+//   1. Cook queue:        chapters where processedAt IS NULL
+//   2. Transcribe queue:  AudioFiles where Transcript IS NULL and
+//                         transcribeAttempts < TRANSCRIBE_MAX_ATTEMPTS
+//   3. Status advancement: sessions where endedAt set + all chapters
+//                          processed + every AudioFile has a Transcript →
+//                          READY
+//
+// Failure handling:
+//   - Cook: failure marks chapter processedAt anyway (so we stop thrashing)
+//     and sets session.status = FAILED. Operator re-nulls processedAt to retry.
+//   - Transcribe: failure increments transcribeAttempts and stores the error
+//     string. We stop trying after TRANSCRIBE_MAX_ATTEMPTS. Operator resets
+//     the counter to retry.
+//
+// Concurrency: cook is sequential per chapter (one at a time). Transcription
+// runs up to `transcribeConcurrency` AudioFiles in parallel — gentler on the
+// Gemini API and the VPS than going wide.
 import path from 'node:path';
 import type { FastifyBaseLogger } from 'fastify';
 
 import { getPrisma } from '../db.js';
 import { cookChapter, recordingBasename } from './cook.js';
+import { transcribeAudioFile } from './transcribe.js';
 import { parseOggUsers } from './users.js';
 
 interface WorkerConfig {
@@ -22,6 +33,11 @@ interface WorkerConfig {
   cookedBaseDir: string;
   pollIntervalMs: number;
   cookTimeoutMs: number;
+  transcribeModel: string;
+  transcribeLanguageHint: string;
+  transcribeConcurrency: number;
+  transcribeMaxAttempts: number;
+  transcribeTimeoutMs: number;
 }
 
 interface WorkerHandle {
@@ -42,14 +58,22 @@ export function startWorker(config: WorkerConfig, log: FastifyBaseLogger): Worke
     if (stopped) return;
     currentTick = (async () => {
       try {
-        // Drain everything available before going back to sleep — keeps
-        // throughput reasonable when several chapters arrive in a burst.
-        // Cap at 10 per tick to avoid starving the event loop.
+        // 1. Drain cook queue (sequential)
         for (let i = 0; i < 10; i++) {
           const processed = await processOneChapter(config, log);
           if (!processed) break;
           if (stopped) return;
         }
+
+        // 2. Drain transcribe queue (parallel up to transcribeConcurrency)
+        for (let i = 0; i < 25; i++) {
+          const processed = await processTranscribeBatch(config, log);
+          if (!processed) break;
+          if (stopped) return;
+        }
+
+        // 3. Advance any sessions that finished while we were working
+        if (!stopped) await advanceCompletedSessions(log);
       } catch (err) {
         log.error({ err }, 'pipeline worker tick failed');
       } finally {
@@ -59,15 +83,21 @@ export function startWorker(config: WorkerConfig, log: FastifyBaseLogger): Worke
     await currentTick;
   };
 
-  // Kick off first tick immediately — picks up anything queued before boot.
   void tick();
-  log.info({ pollIntervalMs: config.pollIntervalMs }, 'pipeline worker started');
+  log.info(
+    {
+      pollIntervalMs: config.pollIntervalMs,
+      transcribeModel: config.transcribeModel,
+      transcribeConcurrency: config.transcribeConcurrency,
+      transcribeMaxAttempts: config.transcribeMaxAttempts
+    },
+    'pipeline worker started'
+  );
 
   return {
     stop: async () => {
       stopped = true;
       if (timer) clearTimeout(timer);
-      // Wait for an in-flight tick to settle so we don't half-finish a cook.
       if (currentTick) {
         try { await currentTick; } catch { /* logged inside */ }
       }
@@ -76,16 +106,12 @@ export function startWorker(config: WorkerConfig, log: FastifyBaseLogger): Worke
   };
 }
 
-/**
- * Process one chapter. Returns true if a chapter was processed (caller can
- * loop to drain more), false if the queue is empty.
- */
+// ---------------------------------------------------------------------------
+// Cook
+// ---------------------------------------------------------------------------
+
 async function processOneChapter(config: WorkerConfig, log: FastifyBaseLogger): Promise<boolean> {
   const prisma = getPrisma();
-
-  // Pick the oldest unprocessed chapter. We're single-worker so no need
-  // for SKIP LOCKED. If we ever scale out, switch to a $queryRaw with
-  // SELECT ... FOR UPDATE SKIP LOCKED.
   const chapter = await prisma.chapter.findFirst({
     where: { processedAt: null },
     orderBy: { receivedAt: 'asc' },
@@ -97,17 +123,10 @@ async function processOneChapter(config: WorkerConfig, log: FastifyBaseLogger): 
   const outputDir = path.join(config.cookedBaseDir, chapter.sessionId, String(chapter.chapterIndex));
 
   log.info(
-    {
-      chapterId: chapter.id,
-      sessionId: chapter.sessionId,
-      chapterIndex: chapter.chapterIndex,
-      recordingId
-    },
+    { chapterId: chapter.id, sessionId: chapter.sessionId, chapterIndex: chapter.chapterIndex, recordingId },
     'cooking chapter'
   );
 
-  // Move the session into COOKING so observers see progress. Don't move it
-  // out at the end — Stage 4 (transcription) will advance from COOKING.
   await prisma.session.update({
     where: { id: chapter.sessionId },
     data: { status: 'COOKING' }
@@ -120,7 +139,6 @@ async function processOneChapter(config: WorkerConfig, log: FastifyBaseLogger): 
       outputDir,
       timeoutMs: config.cookTimeoutMs
     });
-
     if (result.cookExitCode !== 0) {
       throw new Error(`cook.sh exit ${result.cookExitCode}: ${result.cookStderr.slice(-500)}`);
     }
@@ -128,11 +146,8 @@ async function processOneChapter(config: WorkerConfig, log: FastifyBaseLogger): 
       throw new Error('cook.sh produced no FLAC files');
     }
 
-    // Map track index -> user (Discord id + display info).
     const users = await parseOggUsers(chapter.rawUsersPath);
     const userByTrack = new Map(users.map((u) => [u.trackIndex, u]));
-
-    // Resolve Discord IDs to internal User row IDs in one query.
     const discordIds = users
       .map((u) => u.discordUserId)
       .filter((v): v is string => Boolean(v));
@@ -144,20 +159,14 @@ async function processOneChapter(config: WorkerConfig, log: FastifyBaseLogger): 
       : [];
     const internalIdByDiscord = new Map(dbUsers.map((u) => [u.discordUserId, u.id]));
 
-    // Upsert one AudioFile row per cooked track. Unknown user_id → null
-    // (worker logs a warning so it surfaces).
     let unknownUserCount = 0;
     for (const file of result.files) {
       const u = userByTrack.get(file.trackIndex);
       const userId = u?.discordUserId ? internalIdByDiscord.get(u.discordUserId) : undefined;
       if (!userId) unknownUserCount += 1;
-
       await prisma.audioFile.upsert({
         where: {
-          chapterId_trackIndex: {
-            chapterId: chapter.id,
-            trackIndex: file.trackIndex
-          }
+          chapterId_trackIndex: { chapterId: chapter.id, trackIndex: file.trackIndex }
         },
         create: {
           chapterId: chapter.id,
@@ -186,14 +195,8 @@ async function processOneChapter(config: WorkerConfig, log: FastifyBaseLogger): 
       where: { id: chapter.id },
       data: { processedAt: new Date() }
     });
-
     log.info(
-      {
-        chapterId: chapter.id,
-        sessionId: chapter.sessionId,
-        trackCount: result.files.length,
-        outputDir
-      },
+      { chapterId: chapter.id, sessionId: chapter.sessionId, trackCount: result.files.length, outputDir },
       'chapter cooked'
     );
     return true;
@@ -202,7 +205,6 @@ async function processOneChapter(config: WorkerConfig, log: FastifyBaseLogger): 
       { err, chapterId: chapter.id, sessionId: chapter.sessionId, recordingId },
       'cook failed; marking chapter processed and session failed (re-null processed_at to retry)'
     );
-    // Mark processed_at to stop thrash. Operator nulls it to retry.
     await prisma.chapter.update({
       where: { id: chapter.id },
       data: { processedAt: new Date() }
@@ -211,6 +213,156 @@ async function processOneChapter(config: WorkerConfig, log: FastifyBaseLogger): 
       where: { id: chapter.sessionId },
       data: { status: 'FAILED' }
     });
-    return true; // still "processed" something — keep draining
+    return true;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Transcribe
+// ---------------------------------------------------------------------------
+
+/**
+ * Pull up to `transcribeConcurrency` untranscribed AudioFiles and run them
+ * in parallel. Returns true if anything was processed (caller loops).
+ */
+// Typed shape we project from the AudioFile findMany. Spelled out explicitly
+// so TS doesn't need help inferring through the Prisma `include` mechanics —
+// also keeps the code readable when scanning.
+interface TranscribeJob {
+  id: string;
+  cookedPath: string;
+  chapter: { sessionId: string };
+}
+
+async function processTranscribeBatch(config: WorkerConfig, log: FastifyBaseLogger): Promise<boolean> {
+  const prisma = getPrisma();
+  // Only consider AudioFiles whose chapter is already cooked (processedAt
+  // set). transcribeAttempts caps retries; we filter at the DB level.
+  const batch: TranscribeJob[] = await prisma.audioFile.findMany({
+    where: {
+      transcript: null,
+      transcribeAttempts: { lt: config.transcribeMaxAttempts },
+      chapter: { processedAt: { not: null } }
+    },
+    orderBy: { cookedAt: 'asc' },
+    take: config.transcribeConcurrency,
+    select: {
+      id: true,
+      cookedPath: true,
+      chapter: { select: { sessionId: true } }
+    }
+  });
+  if (batch.length === 0) return false;
+
+  // Bump status to TRANSCRIBING for any session whose AudioFile we're about
+  // to touch — but only if still in COOKING (don't downgrade from READY/FAILED).
+  const sessionIds = Array.from(new Set(batch.map((af: TranscribeJob) => af.chapter.sessionId)));
+  await prisma.session.updateMany({
+    where: { id: { in: sessionIds }, status: 'COOKING' },
+    data: { status: 'TRANSCRIBING' }
+  });
+
+  await Promise.all(
+    batch.map((af: TranscribeJob) => transcribeOne(af.id, af.cookedPath, config, log))
+  );
+  return true;
+}
+
+async function transcribeOne(
+  audioFileId: string,
+  cookedPath: string,
+  config: WorkerConfig,
+  log: FastifyBaseLogger
+): Promise<void> {
+  const prisma = getPrisma();
+  log.info({ audioFileId, cookedPath }, 'transcribing audio file');
+  try {
+    const result = await transcribeAudioFile({
+      filePath: cookedPath,
+      model: config.transcribeModel,
+      languageHint: config.transcribeLanguageHint,
+      timeoutMs: config.transcribeTimeoutMs
+    });
+    await prisma.$transaction([
+      prisma.transcript.create({
+        data: {
+          audioFileId,
+          fullText: result.text,
+          language: result.language,
+          geminiRequestId: result.responseId
+        }
+      }),
+      prisma.audioFile.update({
+        where: { id: audioFileId },
+        data: { transcribeError: null }
+      })
+    ]);
+    log.info(
+      { audioFileId, charCount: result.text.length, language: result.language },
+      'audio file transcribed'
+    );
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    const updated = await prisma.audioFile.update({
+      where: { id: audioFileId },
+      data: {
+        transcribeAttempts: { increment: 1 },
+        transcribeError: message.slice(0, 1000)
+      },
+      select: { transcribeAttempts: true }
+    });
+    log.warn(
+      {
+        audioFileId,
+        attempts: updated.transcribeAttempts,
+        maxAttempts: config.transcribeMaxAttempts,
+        err: message
+      },
+      updated.transcribeAttempts >= config.transcribeMaxAttempts
+        ? 'transcribe failed (giving up; nullify audio_files.transcribe_attempts to retry)'
+        : 'transcribe failed (will retry on next tick)'
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Session status advancement
+// ---------------------------------------------------------------------------
+
+/**
+ * Move any TRANSCRIBING session to READY once:
+ *   - session.endedAt is set (final chapter received), AND
+ *   - every chapter has processedAt set, AND
+ *   - every AudioFile has a Transcript.
+ */
+async function advanceCompletedSessions(log: FastifyBaseLogger): Promise<void> {
+  const prisma = getPrisma();
+  const candidates = await prisma.session.findMany({
+    where: {
+      status: { in: ['TRANSCRIBING', 'COOKING'] },
+      endedAt: { not: null }
+    },
+    select: { id: true }
+  });
+  for (const { id } of candidates) {
+    // A single negation query is cheap: "is there any chapter or AudioFile
+    // not yet done?". If there's none, the session is ready.
+    const unfinishedChapter = await prisma.chapter.findFirst({
+      where: { sessionId: id, processedAt: null },
+      select: { id: true }
+    });
+    if (unfinishedChapter) continue;
+
+    const untranscribed = await prisma.audioFile.findFirst({
+      where: { chapter: { sessionId: id }, transcript: null },
+      select: { id: true }
+    });
+    if (untranscribed) continue;
+
+    await prisma.session.update({
+      where: { id },
+      data: { status: 'READY' }
+    });
+    log.info({ sessionId: id }, 'session ready');
   }
 }

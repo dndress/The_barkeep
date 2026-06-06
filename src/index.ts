@@ -26,7 +26,12 @@ async function main(): Promise<void> {
       cookScriptDir: config.COOK_SCRIPT_DIR,
       cookedBaseDir: config.COOKED_PATH,
       pollIntervalMs: config.WORKER_POLL_INTERVAL_MS,
-      cookTimeoutMs: config.COOK_TIMEOUT_MS
+      cookTimeoutMs: config.COOK_TIMEOUT_MS,
+      transcribeModel: config.TRANSCRIBE_MODEL,
+      transcribeLanguageHint: config.TRANSCRIBE_LANGUAGE_HINT,
+      transcribeConcurrency: config.TRANSCRIBE_CONCURRENCY,
+      transcribeMaxAttempts: config.TRANSCRIBE_MAX_ATTEMPTS,
+      transcribeTimeoutMs: config.TRANSCRIBE_TIMEOUT_MS
     },
     app.log
   );

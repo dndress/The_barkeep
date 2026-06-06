@@ -12,7 +12,9 @@ This repo contains the Barkeep service only. Chronicler lives in its own repo.
 
 **Stage 3 (done):** Vendored Craig's `cook` (audio splitter) into the image, runtime audio toolchain (ffmpeg, flac, opus-tools, vorbis-tools, zip), a `barkeep_cooked` volume for per-track FLAC output, and a polling pipeline worker that processes new chapters into per-track audio files and writes `AudioFile` rows mapped to known users by Discord ID.
 
-**Not yet:** Gemini transcription/summarization/embedding, voice-intro extractor, Discord bot, recap scheduler.
+**Stage 4 (done):** `@google/genai` SDK integrated. The worker now also transcribes every cooked `AudioFile` via `gemini-2.5-flash` (Spanish-primary prompt, English allowed for proper nouns / spell names / etc.), writes `Transcript` rows, and advances `Session.status` from `COOKING → TRANSCRIBING → READY` when every chapter is cooked AND every track is transcribed. Up to 2 transcriptions run in parallel; failures retry up to 3 times then park with the error stored on `AudioFile.transcribe_error`.
+
+**Not yet:** summarization/embedding, voice-intro extractor, Discord bot, recap scheduler.
 
 ## Repo layout
 
@@ -221,6 +223,60 @@ The worker picks it back up on the next 30-second tick.
 - **Failure handling** — cook failures mark the chapter `processedAt = now()` (stops retry thrash) and the session `status = FAILED`. The cook stderr tail is logged. Operators re-null `processedAt` to retry.
 - **No transcription yet** — Stage 3 leaves the session in `status: COOKING` (or `FAILED`). Stage 4 will transition it through `TRANSCRIBING → SUMMARIZING → READY → POSTED`.
 
+## Stage 4 verification checklist
+
+Stage 4 requires `GEMINI_API_KEY` in Dokploy's Barkeep env (paste the paid-tier key from your player's Gemini subscription).
+
+After deploying Stage 4, run these against the VPS:
+
+```bash
+# 1. Worker advertises transcription on boot
+sudo docker logs $(sudo docker ps -qf name=barkeep | head -1) 2>&1 | grep "pipeline worker started"
+# Expect: "...transcribeModel":"gemini-2.5-flash","transcribeConcurrency":2,"transcribeMaxAttempts":3...
+
+# 2. After a real recording goes through cook, watch transcription happen
+sudo docker logs $(sudo docker ps -qf name=barkeep | head -1) 2>&1 | grep -E "transcribing audio|audio file transcribed|transcribe failed|session ready" | tail -20
+
+# 3. Confirm Transcript rows landed
+sudo docker exec -it $(sudo docker ps -qf name=barkeep-db) \
+  psql -U barkeep -d barkeep -c \
+  "SELECT s.recording_id, s.status,
+          (SELECT count(*) FROM audio_files af JOIN chapters c ON c.id = af.chapter_id WHERE c.session_id = s.id) AS audio_files,
+          (SELECT count(*) FROM transcripts t JOIN audio_files af ON af.id = t.audio_file_id JOIN chapters c ON c.id = af.chapter_id WHERE c.session_id = s.id) AS transcripts
+   FROM sessions s
+   ORDER BY s.created_at DESC LIMIT 5;"
+# Expect: transcripts == audio_files for finished sessions, status='ready'
+
+# 4. Spot-check actual transcript content
+sudo docker exec -it $(sudo docker ps -qf name=barkeep-db) \
+  psql -U barkeep -d barkeep -c \
+  "SELECT t.language, length(t.full_text) AS chars, substring(t.full_text, 1, 200) AS preview
+   FROM transcripts t
+   JOIN audio_files af ON af.id = t.audio_file_id
+   JOIN chapters c ON c.id = af.chapter_id
+   ORDER BY t.transcribed_at DESC LIMIT 5;"
+# Expect: real Spanish text (with English proper nouns intermixed), 200-char preview readable
+
+# 5. Inspect any retries / failures
+sudo docker exec -it $(sudo docker ps -qf name=barkeep-db) \
+  psql -U barkeep -d barkeep -c \
+  "SELECT id, transcribe_attempts, substring(transcribe_error, 1, 200) FROM audio_files
+   WHERE transcribe_attempts > 0 OR transcribe_error IS NOT NULL;"
+# Expect: empty in happy path
+```
+
+## Retrying failed transcriptions
+
+If an `AudioFile` hits `TRANSCRIBE_MAX_ATTEMPTS` failures without success, it's parked — `transcribe_attempts >= 3` and `transcribe_error` populated. To force a retry after fixing the cause (rotated key, restored quota, etc.):
+
+```sql
+UPDATE audio_files
+SET transcribe_attempts = 0, transcribe_error = NULL
+WHERE id = '<audio-file-uuid>';
+```
+
+The worker picks it back up on the next 30-second tick.
+
 ## Next stage
 
-Stage 4: Gemini transcription. The worker grows a second step: after cooking, upload each `AudioFile` to the Gemini File API, transcribe with `gemini-2.5-flash`, write `Transcript` rows, and advance the session to `TRANSCRIBING → READY`.
+Stage 5: voice-intro extraction + session summarization. Each finished session's first ~3 minutes of each track gets parsed for "I'm X playing Y / I'm DMing tonight / we're playing Z" → writes `session_players` + `session.campaign_id` + `session.dm_user_id`. Then the full set of transcripts is fed to `gemini-2.5-flash` for a structured `Summary` (short paragraph + detailed `key_events` JSON + per-character notable items → `CharacterMemory`).
