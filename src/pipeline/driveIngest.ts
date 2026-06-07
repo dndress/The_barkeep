@@ -170,7 +170,9 @@ export async function pollDriveOnce(
         report.filesSkipped += 1;
         continue;
       }
-      const dbUser = await prisma.user.findUnique({
+      // discordUsername isn't a @unique column in the schema (Discord
+      // usernames can technically be reassigned), so we findFirst.
+      const dbUser = await prisma.user.findFirst({
         where: { discordUsername: username },
         select: { id: true, displayName: true }
       });

@@ -295,7 +295,7 @@ async function processOneChapter(config: WorkerConfig, log: FastifyBaseLogger): 
 
     if (unknownUserCount > 0) {
       log.warn(
-        { chapterId: chapter.id, unknownUserCount, totalTracks: result.files.length },
+        { chapterId: chapter.id, unknownUserCount, totalTracks: trackEntries.length },
         'some tracks did not map to a known User — seed may be missing Discord IDs'
       );
     }
@@ -305,8 +305,14 @@ async function processOneChapter(config: WorkerConfig, log: FastifyBaseLogger): 
       data: { processedAt: new Date() }
     });
     log.info(
-      { chapterId: chapter.id, sessionId: chapter.sessionId, trackCount: result.files.length, outputDir },
-      'chapter cooked'
+      {
+        chapterId: chapter.id,
+        sessionId: chapter.sessionId,
+        trackCount: trackEntries.length,
+        outputDir,
+        cooked: useGemini
+      },
+      useGemini ? 'chapter cooked' : 'chapter user-map persisted (external_whisper)'
     );
     return true;
   } catch (err) {
