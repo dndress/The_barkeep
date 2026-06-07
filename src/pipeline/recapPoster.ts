@@ -1,0 +1,122 @@
+// Stage 6 — Recap posting drain step.
+//
+// The worker calls postOneScheduledRecap() once per tick. It looks for a
+// session that is:
+//   - status = READY
+//   - recap_scheduled_for <= NOW
+//   - recap_posted_at IS NULL
+//   - recap_post_attempts < cap
+//   - campaignId set + summary exists (we wouldn't be READY otherwise, but
+//     belt-and-braces)
+//
+// And posts an embed to that campaign's text channel via discord.js.
+import { EmbedBuilder } from 'discord.js';
+import type { FastifyBaseLogger } from 'fastify';
+
+import { getPrisma } from '../db.js';
+import { getDiscordClient, isDiscordReady } from '../discord/client.js';
+
+export interface RecapPosterConfig {
+  maxAttempts: number;
+}
+
+interface KeyEventLike {
+  description: string;
+  characters_involved: string[];
+  importance: number;
+}
+
+function formatKeyEvents(events: KeyEventLike[]): string {
+  if (events.length === 0) return '_(none)_';
+  return events
+    .slice(0, 8)
+    .sort((a, b) => b.importance - a.importance)
+    .map((e) => {
+      const who = e.characters_involved?.length
+        ? ` _(${e.characters_involved.join(', ')})_`
+        : '';
+      return `• ${e.description}${who}`;
+    })
+    .join('\n');
+}
+
+export async function postOneScheduledRecap(
+  config: RecapPosterConfig,
+  log: FastifyBaseLogger
+): Promise<boolean> {
+  if (!isDiscordReady()) {
+    return false; // Quiet — we'll try next tick once discord is up
+  }
+  const prisma = getPrisma();
+  const session = await prisma.session.findFirst({
+    where: {
+      status: 'READY',
+      recapScheduledFor: { lte: new Date() },
+      recapPostedAt: null,
+      recapPostAttempts: { lt: config.maxAttempts },
+      campaignId: { not: null }
+    },
+    orderBy: { recapScheduledFor: 'asc' },
+    include: {
+      summary: true,
+      campaign: { select: { id: true, name: true, discordTextChannelId: true } }
+    }
+  });
+  if (!session || !session.summary || !session.campaign) return false;
+
+  log.info(
+    {
+      sessionId: session.id,
+      campaign: session.campaign.name,
+      sessionNumber: session.sessionNumber,
+      channelId: session.campaign.discordTextChannelId
+    },
+    'posting recap'
+  );
+
+  try {
+    const client = getDiscordClient();
+    const channel = await client.channels.fetch(session.campaign.discordTextChannelId);
+    if (!channel || !channel.isTextBased() || !('send' in channel)) {
+      throw new Error(
+        `campaign.discordTextChannelId ${session.campaign.discordTextChannelId} is not a sendable text channel`
+      );
+    }
+
+    const events = Array.isArray(session.summary.keyEvents)
+      ? (session.summary.keyEvents as unknown as KeyEventLike[])
+      : [];
+    const embed = new EmbedBuilder()
+      .setTitle(
+        `📜 ${session.campaign.name} — Session ${session.sessionNumber ?? '?'}`
+      )
+      .setDescription(session.summary.short.slice(0, 4000))
+      .setColor(0xb87333)
+      .addFields({ name: '✨ Eventos clave', value: formatKeyEvents(events).slice(0, 1024) })
+      .setFooter({ text: 'Pregúntame con /ask "..." (próximamente)' });
+
+    await channel.send({ embeds: [embed] });
+
+    await prisma.session.update({
+      where: { id: session.id },
+      data: {
+        recapPostedAt: new Date(),
+        status: 'POSTED',
+        recapPostError: null
+      }
+    });
+    log.info({ sessionId: session.id }, 'recap posted');
+    return true;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    log.error({ err: message, sessionId: session.id }, 'recap post failed');
+    await prisma.session.update({
+      where: { id: session.id },
+      data: {
+        recapPostAttempts: { increment: 1 },
+        recapPostError: message.slice(0, 1000)
+      }
+    });
+    return true; // still processed (consumed a tick slot)
+  }
+}

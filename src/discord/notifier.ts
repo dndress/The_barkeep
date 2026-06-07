@@ -1,154 +1,140 @@
-// Minimal Discord notifier — REST-only, no gateway connection.
+// Discord notifications — Stage 6 version (full discord.js client).
 //
-// Purpose: send Andres (the admin / developer) a Direct Message when the
-// pipeline hits something that needs human intervention. Right now that's
-// just "couldn't reconcile a session's campaign/DM/characters" but the
-// surface is meant to grow as we add more ops-relevant signals.
+// Two surfaces:
+//   - notifyAdmin(message, context?) — drop a plain text DM to the admin.
+//     Used for "summary failed N times", "cook errored unrecoverably", and
+//     anything else where a free-text message is all we need.
 //
-// Why REST-only (not discord.js): we don't need slash commands or message
-// listeners yet — those come in Stage 6 when the Barkeep starts answering
-// players. Avoiding the gateway keeps the runtime lean and avoids managing
-// a long-lived WebSocket connection.
+//   - notifyAdminNeedsReview(sessionId, reason, campaigns) — drops a DM
+//     with action buttons (one per campaign + a Skip). Used when intro
+//     extraction couldn't pin down the campaign.
 //
-// Idempotency: no — duplicate calls send duplicate DMs. Callers are
-// expected to gate notifications behind a status change (e.g. only on the
-// transition to NEEDS_REVIEW).
+// Both gracefully no-op when discord isn't ready (logs warn, doesn't throw)
+// so a Discord outage never breaks the pipeline.
+import {
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  type Client,
+  type MessageCreateOptions
+} from 'discord.js';
 import type { FastifyBaseLogger } from 'fastify';
 
-const DISCORD_API = 'https://discord.com/api/v10';
-
-interface NotifierConfig {
-  botToken: string;
-  adminUserId: string;
-}
+import { getDiscordClient, isDiscordReady } from './client.js';
 
 export interface AdminMessageContext {
-  /** Optional structured context. Rendered inline as a small code block. */
   [key: string]: unknown;
 }
 
-let _config: NotifierConfig | null | undefined;
-
-function getNotifierConfig(): NotifierConfig | null {
-  if (_config !== undefined) return _config;
-  const botToken = process.env.BARKEEP_DISCORD_BOT_TOKEN;
-  const adminUserId = process.env.ADMIN_DISCORD_USER_ID;
-  if (!botToken || !adminUserId) {
-    _config = null;
-  } else {
-    _config = { botToken, adminUserId };
+async function fetchAdmin(client: Client): Promise<import('discord.js').User | null> {
+  const adminId = process.env.ADMIN_DISCORD_USER_ID;
+  if (!adminId) return null;
+  try {
+    return await client.users.fetch(adminId);
+  } catch (err) {
+    return null;
   }
-  return _config;
 }
 
-async function discordFetch(
-  cfg: NotifierConfig,
-  path: string,
-  init: RequestInit & { body?: string } = {}
-): Promise<Response> {
-  return fetch(`${DISCORD_API}${path}`, {
-    ...init,
-    headers: {
-      ...(init.headers ?? {}),
-      Authorization: `Bot ${cfg.botToken}`,
-      'Content-Type': 'application/json',
-      'User-Agent': 'BarkeepBot (https://github.com/, v0.5.0)'
-    }
-  });
+function buildContextBlock(context: AdminMessageContext | undefined): string {
+  if (!context || Object.keys(context).length === 0) return '';
+  const json = JSON.stringify(context, null, 2);
+  // 2000-char message cap; leave headroom for the main message.
+  const room = 1700;
+  const trimmed = json.length > room ? json.slice(0, room - 3) + '...' : json;
+  return `\n\`\`\`json\n${trimmed}\n\`\`\``;
 }
 
-async function withRateLimitRetry<T>(
-  log: FastifyBaseLogger,
-  fn: () => Promise<Response>,
-  parse: (r: Response) => Promise<T>
-): Promise<T> {
-  const first = await fn();
-  if (first.status === 429) {
-    // Discord tells us how long to wait via retry_after (seconds).
-    let waitMs = 1000;
-    try {
-      const body = (await first.clone().json()) as { retry_after?: number };
-      if (typeof body.retry_after === 'number') waitMs = Math.ceil(body.retry_after * 1000);
-    } catch {
-      // ignore parse error, use default
-    }
-    log.warn({ waitMs }, 'discord rate-limited; retrying once');
-    await new Promise((resolve) => setTimeout(resolve, waitMs));
-    const second = await fn();
-    if (!second.ok) {
-      throw new Error(`discord retry failed: HTTP ${second.status} ${await second.text()}`);
-    }
-    return parse(second);
-  }
-  if (!first.ok) {
-    throw new Error(`discord call failed: HTTP ${first.status} ${await first.text()}`);
-  }
-  return parse(first);
-}
-
-/** Resolve or open a DM channel with the admin. Cached in memory. */
-let _dmChannelId: string | undefined;
-async function getAdminDmChannel(cfg: NotifierConfig, log: FastifyBaseLogger): Promise<string> {
-  if (_dmChannelId) return _dmChannelId;
-  const data = await withRateLimitRetry(
-    log,
-    () =>
-      discordFetch(cfg, '/users/@me/channels', {
-        method: 'POST',
-        body: JSON.stringify({ recipient_id: cfg.adminUserId })
-      }),
-    (r) => r.json() as Promise<{ id: string }>
-  );
-  _dmChannelId = data.id;
-  return data.id;
-}
-
-/**
- * Send a DM to the admin. No-op (and logs a warning) when bot token or
- * admin id isn't configured — Stage 5 will still work without the bot, but
- * NEEDS_REVIEW sessions will only show up in logs and DB.
- *
- * Failures are caught + logged but never thrown — a Discord outage must
- * not break the pipeline.
- */
 export async function notifyAdmin(
   log: FastifyBaseLogger,
   message: string,
   context?: AdminMessageContext
 ): Promise<void> {
-  const cfg = getNotifierConfig();
-  if (!cfg) {
-    log.warn(
-      { message },
-      'notifyAdmin called but BARKEEP_DISCORD_BOT_TOKEN or ADMIN_DISCORD_USER_ID is unset — skipping DM'
-    );
+  if (!isDiscordReady()) {
+    log.warn({ message }, 'notifyAdmin called but discord client isn\'t ready — skipping DM');
     return;
   }
-
-  // Format the body: human-readable message + optional context block.
-  let body = message;
-  if (context && Object.keys(context).length > 0) {
-    const json = JSON.stringify(context, null, 2);
-    // Discord caps message content at 2000 chars; trim the context if
-    // necessary so we don't lose the human-readable lead.
-    const room = 1900 - body.length - 10; // 10 for the code-fence markers
-    const ctx = json.length > room ? json.slice(0, Math.max(0, room - 3)) + '...' : json;
-    body += `\n\`\`\`json\n${ctx}\n\`\`\``;
+  if (!process.env.ADMIN_DISCORD_USER_ID) {
+    log.warn({ message }, 'ADMIN_DISCORD_USER_ID unset — skipping DM');
+    return;
   }
-
   try {
-    const channelId = await getAdminDmChannel(cfg, log);
-    await withRateLimitRetry(
-      log,
-      () =>
-        discordFetch(cfg, `/channels/${channelId}/messages`, {
-          method: 'POST',
-          body: JSON.stringify({ content: body })
-        }),
-      (r) => r.json() as Promise<unknown>
-    );
-    log.info({ adminUserId: cfg.adminUserId }, 'admin DM sent');
+    const client = getDiscordClient();
+    const admin = await fetchAdmin(client);
+    if (!admin) {
+      log.warn('could not fetch admin user — skipping DM');
+      return;
+    }
+    await admin.send({ content: (message + buildContextBlock(context)).slice(0, 2000) });
+    log.info('admin DM sent');
   } catch (err) {
-    log.error({ err }, 'failed to send admin DM (continuing)');
+    log.error({ err }, 'failed to send admin DM');
+  }
+}
+
+export interface NeedsReviewCampaignChoice {
+  id: string;
+  name: string;
+}
+
+/**
+ * Send the admin a NEEDS_REVIEW DM with one button per campaign + Skip.
+ * Discord caps a single row at 5 buttons — if there are more campaigns we
+ * spill into a second row (cap 5 rows total).
+ */
+export async function notifyAdminNeedsReview(
+  log: FastifyBaseLogger,
+  sessionId: string,
+  reason: string,
+  campaigns: NeedsReviewCampaignChoice[]
+): Promise<void> {
+  if (!isDiscordReady()) {
+    log.warn({ sessionId, reason }, 'notifyAdminNeedsReview: discord not ready, skipping DM');
+    return;
+  }
+  try {
+    const client = getDiscordClient();
+    const admin = await fetchAdmin(client);
+    if (!admin) {
+      log.warn('could not fetch admin user — skipping NEEDS_REVIEW DM');
+      return;
+    }
+
+    const buttons: ButtonBuilder[] = campaigns.slice(0, 24).map((c) =>
+      new ButtonBuilder()
+        // customId format: "nr:tag:<sessionId>:<campaignId>" — see needsReviewButtons.ts
+        // Discord limits customId to 100 chars; UUIDs are 36 each, prefix is 7. Safe.
+        .setCustomId(`nr:tag:${sessionId}:${c.id}`)
+        .setLabel(c.name)
+        .setStyle(ButtonStyle.Primary)
+    );
+    buttons.push(
+      new ButtonBuilder()
+        .setCustomId(`nr:skip:${sessionId}`)
+        .setLabel('Skip — handle later')
+        .setStyle(ButtonStyle.Secondary)
+    );
+
+    // Discord: max 5 buttons per row, max 5 rows.
+    const rows: ActionRowBuilder<ButtonBuilder>[] = [];
+    for (let i = 0; i < buttons.length; i += 5) {
+      rows.push(new ActionRowBuilder<ButtonBuilder>().addComponents(buttons.slice(i, i + 5)));
+      if (rows.length === 5) break;
+    }
+
+    const content = [
+      `🛠️ **Session needs review**`,
+      ``,
+      `**Reason:** ${reason}`,
+      `**Session ID:** \`${sessionId}\``,
+      ``,
+      `Pick the campaign this session belongs to, or use \`/tag-session\` for finer control.`
+    ].join('\n');
+
+    const options: MessageCreateOptions = { content, components: rows };
+    await admin.send(options);
+    log.info({ sessionId, campaignChoices: campaigns.length }, 'needs-review DM sent with buttons');
+  } catch (err) {
+    log.error({ err, sessionId }, 'failed to send NEEDS_REVIEW DM');
   }
 }

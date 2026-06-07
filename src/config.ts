@@ -47,6 +47,11 @@ const Env = z.object({
   BARKEEP_DISCORD_BOT_TOKEN: z.string().min(1).optional(),
   ADMIN_DISCORD_USER_ID: z.string().min(1).optional(),
 
+  // Stage 6 — full Discord bot
+  DISCORD_GUILD_ID: z.string().min(1).optional(),
+  RECAP_DELAY_HOURS: z.coerce.number().int().nonnegative().default(10),
+  RECAP_POST_MAX_ATTEMPTS: z.coerce.number().int().positive().default(3),
+
   NODE_ENV: z.enum(['development', 'production', 'test']).default('production')
 });
 

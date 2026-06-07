@@ -18,7 +18,9 @@ This repo contains the Barkeep service only. Chronicler lives in its own repo.
 
 **Stage 5 (done):** Once a session's transcripts are all in, the worker runs an end-to-end pipeline: (1) per-track **intro extraction** via Gemini → who's playing what, who's DMing, what game; (2) **reconciliation** with fuzzy campaign matching, multiple fallbacks, and a `NEEDS_REVIEW` exit when ambiguous; (3) **chronological summary + character memories** — segments from all tracks are merged by absolute wall-clock time, labeled with character names, sent in one Gemini call with structured JSON output (`short`, `full`, `key_events`, `character_memories`). Status flow: `TRANSCRIBING → SUMMARIZING → READY` (or `NEEDS_REVIEW`). When something needs manual attention, a **minimal Discord REST-only notifier** DMs the admin user (`ADMIN_DISCORD_USER_ID`) via the Barkeep bot token.
 
-**Not yet:** Discord bot (full client, slash commands, the actual recap post), embeddings + RAG, voice-channel responses.
+**Stage 6 (done):** Full `discord.js` client replaces the REST-only notifier. Worker grows a fifth drain step that **posts session recaps** as rich embeds to the campaign's text channel at `recap_scheduled_for` (default `Session.endedAt + 10h`), then advances `READY → POSTED`. Three **slash commands** registered guild-scoped: `/tag-session` (admin-only, fix a `NEEDS_REVIEW` session — same fix is one click away via **action buttons** that now ship in every needs-review DM), `/recap` (public, show a past session's short summary in the campaign's channel), `/whodunit` (ephemeral, "who played character X recently"). `Session.sessionNumber` is now auto-assigned the first time we know the session's campaign.
+
+**Not yet:** embeddings + RAG, `/ask` Barkeep persona, voice-channel responses, art generation.
 
 **Not yet:** summarization/embedding, voice-intro extractor, Discord bot, recap scheduler.
 
@@ -377,9 +379,57 @@ sudo docker inspect $(sudo docker ps -qf name=barkeep | head -1) \
   --format '{{range .Config.Env}}{{println .}}{{end}}' | grep <VAR_NAME>
 ```
 
+## Stage 6 — Re-inviting the bot (one-time)
+
+When you originally invited the Barkeep bot it likely only had `Send Messages`. Stage 6 needs a few more permissions. Re-invite with this URL (replace `<APPLICATION_ID>` with your bot's application ID from the Discord Developer Portal):
+
+```
+https://discord.com/oauth2/authorize
+  ?client_id=<APPLICATION_ID>
+  &scope=bot%20applications.commands
+  &permissions=2147485696
+```
+
+The `permissions` integer covers Send Messages + Embed Links + Use Application Commands + View Channels. The `applications.commands` scope is required for slash commands to even be visible in the guild. Authorize again on the same server; Discord upgrades the existing membership in place.
+
+## Stage 6 verification checklist
+
+After deploying Stage 6:
+
+```bash
+# 1. Bot logs in
+sudo docker logs $(sudo docker ps -qf name=barkeep | head -1) 2>&1 \
+  | grep -E "discord client ready|slash commands registered" | tail -5
+
+# 2. Slash commands appear — in Discord, type "/" in any channel of D&D-IJR
+#    you should see /tag-session, /recap, /whodunit in the picker.
+
+# 3. NEEDS_REVIEW DM now ships with buttons. Reproduce by re-flipping
+#    the existing test session if it's still around:
+sudo docker exec -it $(sudo docker ps -qf name=barkeep-db) \
+  psql -U barkeep -d barkeep -c \
+  "UPDATE sessions SET status='summarizing', summarize_attempts=0, summarize_error=NULL
+   WHERE id='2f7b7380-fc8a-40f1-921f-246df4912370';"
+#    Wait ~30s; the bot should DM you with [Drakar] [Hellknight Hill] [Skip] buttons.
+#    Click one, see the message edit to "Tagged as ..." and the session
+#    move back into the pipeline.
+
+# 4. /recap in the campaign channel (after a real session is summarized):
+#    /recap                       → most recent of that channel's campaign
+#    /recap session_number:3      → specific session
+#    /recap campaign:Drakar       → explicit campaign override
+
+# 5. /whodunit character:Cuervo   → ephemeral list of recent sessions
+
+# 6. Recap auto-post — after a session reaches READY and recap_scheduled_for
+#    elapses, the worker posts the embed and moves to POSTED. To force-test
+#    instantly without waiting 10h:
+sudo docker exec -it $(sudo docker ps -qf name=barkeep-db) \
+  psql -U barkeep -d barkeep -c \
+  "UPDATE sessions SET recap_scheduled_for = NOW() WHERE status = 'ready';"
+#    Within 30s the embed lands in the campaign's text channel.
+```
+
 ## Next stage
 
-Stage 6: full Discord bot. Replaces the REST-only notifier with a `discord.js` client that:
-- Posts the `short` summary + art to the campaign's text channel at `recap_scheduled_for` (Session.endedAt + 10h)
-- Listens for `/ask <question>` slash commands and answers in-character via RAG (after Stage 7 adds embeddings)
-- Listens for `/tag-session <campaign> [<dm>]` so you can fix `NEEDS_REVIEW` from Discord instead of SQL.
+Stage 7: embeddings + `/ask`. Chunk transcripts + summary into ~500-token pieces, embed via Gemini `text-embedding-004`, store in pgvector. `/ask <question>` runs vector search filtered by the channel's campaign, builds a context bundle with retrieved chunks + character memories, and calls `gemini-2.5-pro` (paid tier, for quality) with the Barkeep persona prompt.

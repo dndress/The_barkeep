@@ -24,10 +24,11 @@ import path from 'node:path';
 import type { FastifyBaseLogger } from 'fastify';
 
 import { getPrisma } from '../db.js';
-import { notifyAdmin } from '../discord/notifier.js';
+import { notifyAdmin, notifyAdminNeedsReview } from '../discord/notifier.js';
 import { cookChapter, recordingBasename } from './cook.js';
 import { extractIntroFromTranscript } from './extractIntros.js';
 import { reconcileSession, type PerTrackExtraction } from './reconcile.js';
+import { postOneScheduledRecap } from './recapPoster.js';
 import { summarizeSession } from './summarize.js';
 import { transcribeAudioFile } from './transcribe.js';
 import { parseOggUsers } from './users.js';
@@ -50,6 +51,8 @@ interface WorkerConfig {
   shortSummaryWordTarget: number;
   keyEventsTarget: number;
   introExtractionTimeoutMs: number;
+  // Stage 6
+  recapPostMaxAttempts: number;
 }
 
 interface WorkerHandle {
@@ -95,6 +98,19 @@ export function startWorker(config: WorkerConfig, log: FastifyBaseLogger): Worke
         if (!stopped) {
           for (let i = 0; i < 3; i++) {
             const processed = await processOneSummarize(config, log);
+            if (!processed) break;
+            if (stopped) return;
+          }
+        }
+
+        // 5. Drain recap-post queue. Each tick can post at most a few; we
+        // don't want to spam the channel if many sessions ripened at once.
+        if (!stopped) {
+          for (let i = 0; i < 3; i++) {
+            const processed = await postOneScheduledRecap(
+              { maxAttempts: config.recapPostMaxAttempts },
+              log
+            );
             if (!processed) break;
             if (stopped) return;
           }
@@ -527,11 +543,12 @@ async function processOneSummarize(
         where: { id: session.id },
         data: { status: 'NEEDS_REVIEW', summarizeError: reconciliation.reason }
       });
-      await notifyAdmin(
-        log,
-        `Session needs manual review.\nReason: ${reconciliation.reason}\nSession ID: \`${session.id}\``,
-        { reason: reconciliation.reason, ...reconciliation.diagnostics }
-      );
+      // Send DM with action buttons (one per active campaign in this guild).
+      const campaignChoices = await prisma.campaign.findMany({
+        where: { discordGuildId: session.discordGuildId, active: true },
+        select: { id: true, name: true }
+      });
+      await notifyAdminNeedsReview(log, session.id, reconciliation.reason, campaignChoices);
       return true;
     }
 
@@ -550,11 +567,19 @@ async function processOneSummarize(
           }
         });
       }
+      // Assign sessionNumber as max(existing) + 1 for the campaign — first
+      // time we know which campaign this session belongs to.
+      const maxRow = await tx.session.aggregate({
+        where: { campaignId: reconciliation.campaignId, sessionNumber: { not: null } },
+        _max: { sessionNumber: true }
+      });
+      const nextNumber = (maxRow._max.sessionNumber ?? 0) + 1;
       await tx.session.update({
         where: { id: session.id },
         data: {
           campaignId: reconciliation.campaignId,
           dmUserId: reconciliation.dmUserId,
+          sessionNumber: nextNumber,
           detectionMethod: 'VOICE_INTRO'
         }
       });

@@ -75,6 +75,10 @@ services:
       # Stage 5 — Discord admin notifier (REST-only, no gateway yet)
       BARKEEP_DISCORD_BOT_TOKEN: ${BARKEEP_DISCORD_BOT_TOKEN:-}
       ADMIN_DISCORD_USER_ID: ${ADMIN_DISCORD_USER_ID:-}
+      # Stage 6 — full Discord bot
+      DISCORD_GUILD_ID: ${DISCORD_GUILD_ID:-698633790972493855}
+      RECAP_DELAY_HOURS: ${RECAP_DELAY_HOURS:-10}
+      RECAP_POST_MAX_ATTEMPTS: ${RECAP_POST_MAX_ATTEMPTS:-3}
     ports:
       # Exposed for local curl testing. In Dokploy you'll typically route via
       # Traefik instead; can be removed once Chronicler is talking to us

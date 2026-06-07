@@ -1,11 +1,15 @@
 // Entrypoint. Boot order:
 //   1. Load + validate env (fail fast on misconfig).
 //   2. Build Fastify app (Fastify owns the logger internally).
-//   3. Listen.
-//   4. Start the pipeline worker.
-//   5. Wire signal handlers so Docker stop is graceful (release DB pool too).
+//   3. Listen on HTTP.
+//   4. Start Discord client + register slash commands (Stage 6).
+//   5. Start pipeline worker (after Discord so notifyAdmin works).
+//   6. Wire signal handlers so Docker stop is graceful.
 import { loadConfig } from './config.js';
 import { disconnectPrisma } from './db.js';
+import { startDiscordClient, destroyDiscordClient } from './discord/client.js';
+import { registerSlashCommands } from './discord/commands/register.js';
+import { wireInteractionHandler } from './discord/handlers/interactions.js';
 import { startWorker } from './pipeline/worker.js';
 import { buildServer } from './server.js';
 
@@ -19,6 +23,38 @@ async function main(): Promise<void> {
   } catch (err) {
     app.log.error({ err }, 'failed to start server');
     process.exit(1);
+  }
+
+  // Bring up Discord BEFORE the worker so notifyAdmin works on first tick
+  // and slash commands are registered.
+  const discordStarted = config.BARKEEP_DISCORD_BOT_TOKEN
+    ? startDiscordClient({ token: config.BARKEEP_DISCORD_BOT_TOKEN, log: app.log })
+        .then(async (client) => {
+          wireInteractionHandler(client, app.log);
+          if (config.DISCORD_GUILD_ID) {
+            try {
+              await registerSlashCommands(client, config.DISCORD_GUILD_ID, app.log);
+            } catch (err) {
+              app.log.error({ err }, 'slash command registration failed');
+            }
+          } else {
+            app.log.warn(
+              'DISCORD_GUILD_ID unset — skipping slash command registration; commands will not appear'
+            );
+          }
+          return client;
+        })
+        .catch((err) => {
+          app.log.error({ err }, 'discord client failed to start — bot features will be degraded');
+        })
+    : Promise.resolve(undefined);
+
+  if (config.BARKEEP_DISCORD_BOT_TOKEN) {
+    // We don't block the HTTP listener on Discord; the worker will gracefully
+    // skip notifyAdmin until ready (isDiscordReady gates it).
+    void discordStarted;
+  } else {
+    app.log.warn('BARKEEP_DISCORD_BOT_TOKEN unset — Discord features disabled');
   }
 
   const worker = startWorker(
@@ -38,7 +74,8 @@ async function main(): Promise<void> {
       summarizeTimeoutMs: config.SUMMARIZE_TIMEOUT_MS,
       shortSummaryWordTarget: config.SHORT_SUMMARY_WORD_TARGET,
       keyEventsTarget: config.KEY_EVENTS_TARGET,
-      introExtractionTimeoutMs: config.INTRO_EXTRACTION_TIMEOUT_MS
+      introExtractionTimeoutMs: config.INTRO_EXTRACTION_TIMEOUT_MS,
+      recapPostMaxAttempts: config.RECAP_POST_MAX_ATTEMPTS
     },
     app.log
   );
@@ -46,9 +83,9 @@ async function main(): Promise<void> {
   const shutdown = async (signal: string): Promise<void> => {
     app.log.info(`received ${signal}, shutting down`);
     try {
-      // Stop accepting new work first so in-flight cooks can finish.
       await worker.stop();
       await app.close();
+      await destroyDiscordClient();
       await disconnectPrisma();
       process.exit(0);
     } catch (err) {

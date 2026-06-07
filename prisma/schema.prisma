@@ -145,6 +145,9 @@ model Session {
   // Stage 5 (intro extraction + summarization) bookkeeping
   summarizeAttempts   Int                      @default(0) @map("summarize_attempts")
   summarizeError      String?                  @map("summarize_error")
+  // Stage 6 (recap posting) bookkeeping
+  recapPostAttempts   Int                      @default(0) @map("recap_post_attempts")
+  recapPostError      String?                  @map("recap_post_error")
   createdAt           DateTime                 @default(now()) @map("created_at")
   updatedAt           DateTime                 @updatedAt @map("updated_at")
 
