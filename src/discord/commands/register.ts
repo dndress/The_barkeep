@@ -13,6 +13,10 @@ import type { FastifyBaseLogger } from 'fastify';
 import { data as tagSessionData } from './tagSession.js';
 import { data as recapData } from './recap.js';
 import { data as whodunitData } from './whodunit.js';
+import { data as transcriptionSourceData } from './transcriptionSource.js';
+import { data as driveFolderData } from './driveFolder.js';
+import { data as checkDriveData } from './checkDrive.js';
+import { data as useGeminiForData } from './useGeminiFor.js';
 
 export async function registerSlashCommands(
   client: Client,
@@ -23,6 +27,15 @@ export async function registerSlashCommands(
     throw new Error('client.application is null at registration time — client must be ready');
   }
   const guild = await client.guilds.fetch(guildId);
-  await guild.commands.set([tagSessionData.toJSON(), recapData.toJSON(), whodunitData.toJSON()]);
-  log.info({ guildId, count: 3 }, 'slash commands registered');
+  const commands = [
+    tagSessionData.toJSON(),
+    recapData.toJSON(),
+    whodunitData.toJSON(),
+    transcriptionSourceData.toJSON(),
+    driveFolderData.toJSON(),
+    checkDriveData.toJSON(),
+    useGeminiForData.toJSON()
+  ];
+  await guild.commands.set(commands);
+  log.info({ guildId, count: commands.length }, 'slash commands registered');
 }

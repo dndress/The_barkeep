@@ -9,6 +9,10 @@ import type { FastifyBaseLogger } from 'fastify';
 import * as tagSession from '../commands/tagSession.js';
 import * as recap from '../commands/recap.js';
 import * as whodunit from '../commands/whodunit.js';
+import * as transcriptionSource from '../commands/transcriptionSource.js';
+import * as driveFolder from '../commands/driveFolder.js';
+import { makeExecute as makeCheckDriveExecute, data as checkDriveData } from '../commands/checkDrive.js';
+import * as useGeminiFor from '../commands/useGeminiFor.js';
 import { handleNeedsReviewButton, isNeedsReviewButton } from './needsReviewButtons.js';
 
 interface CommandModule {
@@ -16,17 +20,28 @@ interface CommandModule {
   autocomplete?: (interaction: import('discord.js').AutocompleteInteraction) => Promise<void>;
 }
 
-const COMMANDS: Record<string, CommandModule> = {
-  'tag-session': tagSession,
-  recap,
-  whodunit
-};
+export interface InteractionHandlerDeps {
+  googleApiKey: string | undefined;
+}
 
-export function wireInteractionHandler(client: Client, log: FastifyBaseLogger): void {
+export function wireInteractionHandler(
+  client: Client,
+  log: FastifyBaseLogger,
+  deps: InteractionHandlerDeps
+): void {
+  const COMMANDS: Record<string, CommandModule> = {
+    'tag-session': tagSession,
+    recap,
+    whodunit,
+    'transcription-source': transcriptionSource,
+    'drive-folder': driveFolder,
+    [checkDriveData.name]: { execute: makeCheckDriveExecute({ log, googleApiKey: deps.googleApiKey }) },
+    'use-gemini-for': useGeminiFor
+  };
   client.on('interactionCreate', async (interaction: Interaction) => {
     try {
       if (interaction.isChatInputCommand()) {
-        const mod = COMMANDS[interaction.commandName];
+        const mod = COMMANDS[interaction.commandName] as CommandModule | undefined;
         if (!mod) {
           log.warn({ commandName: interaction.commandName }, 'unknown slash command');
           return;
@@ -35,7 +50,7 @@ export function wireInteractionHandler(client: Client, log: FastifyBaseLogger): 
         return;
       }
       if (interaction.isAutocomplete()) {
-        const mod = COMMANDS[interaction.commandName];
+        const mod = COMMANDS[interaction.commandName] as CommandModule | undefined;
         if (!mod?.autocomplete) return;
         await mod.autocomplete(interaction);
         return;

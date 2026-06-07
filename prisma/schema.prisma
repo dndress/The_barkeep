@@ -120,6 +120,29 @@ enum CampaignDetectionMethod {
   MANUAL_TAG  @map("manual_tag")
 }
 
+// Stage 6.5 — which transcription path a session uses.
+// Default is external_whisper (player runs Whisper locally, drops JSON
+// into Drive). The bot can be flipped globally or per-session to gemini.
+enum TranscriptionSource {
+  GEMINI           @map("gemini")
+  EXTERNAL_WHISPER @map("external_whisper")
+}
+
+// Singleton table — there's only ever one row (id=1). Holds the global
+// runtime preferences a slash command can flip without restarting.
+model BotSettings {
+  id                       Int                 @id @default(1)
+  transcriptionSource      TranscriptionSource @default(EXTERNAL_WHISPER) @map("transcription_source")
+  // Google Drive parent folder ID where session subfolders are expected.
+  // NULL until the admin sets it with /drive-folder.
+  driveFolderId            String?             @map("drive_folder_id")
+  drivePollIntervalHours   Int                 @default(6) @map("drive_poll_interval_hours")
+  driveLastPolledAt        DateTime?           @map("drive_last_polled_at")
+  updatedAt                DateTime            @updatedAt @map("updated_at")
+
+  @@map("bot_settings")
+}
+
 model Session {
   id                  String                   @id @default(uuid())
   // Chronicler's recording ID — webhook key. UNIQUE so re-fire of the first
@@ -148,6 +171,12 @@ model Session {
   // Stage 6 (recap posting) bookkeeping
   recapPostAttempts   Int                      @default(0) @map("recap_post_attempts")
   recapPostError      String?                  @map("recap_post_error")
+  // Stage 6.5 (external transcripts) — per-session override of the global
+  // BotSettings.transcriptionSource. NULL = inherit the global.
+  transcriptionSource           TranscriptionSource? @map("transcription_source")
+  // First time the Drive ingester looked for transcripts for this session.
+  // Used to drive the 10-day Gemini fallback + 14-day stop.
+  transcriptIngestFirstCheckedAt DateTime?           @map("transcript_ingest_first_checked_at")
   createdAt           DateTime                 @default(now()) @map("created_at")
   updatedAt           DateTime                 @updatedAt @map("updated_at")
 

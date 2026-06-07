@@ -26,12 +26,35 @@ import type { FastifyBaseLogger } from 'fastify';
 import { getPrisma } from '../db.js';
 import { notifyAdmin, notifyAdminNeedsReview } from '../discord/notifier.js';
 import { cookChapter, recordingBasename } from './cook.js';
+import { pollDriveOnce } from './driveIngest.js';
 import { extractIntroFromTranscript } from './extractIntros.js';
 import { reconcileSession, type PerTrackExtraction } from './reconcile.js';
 import { postOneScheduledRecap } from './recapPoster.js';
 import { summarizeSession } from './summarize.js';
 import { transcribeAudioFile } from './transcribe.js';
 import { parseOggUsers } from './users.js';
+
+/**
+ * Returns 'GEMINI' or 'EXTERNAL_WHISPER' — the effective transcription
+ * source for a session. Per-session override wins; falls back to the
+ * BotSettings global; falls back to EXTERNAL_WHISPER if even settings
+ * are missing (seed should have created them, but defensive).
+ */
+async function effectiveTranscriptionSource(
+  sessionId: string
+): Promise<'GEMINI' | 'EXTERNAL_WHISPER'> {
+  const prisma = getPrisma();
+  const session = await prisma.session.findUnique({
+    where: { id: sessionId },
+    select: { transcriptionSource: true }
+  });
+  if (session?.transcriptionSource) return session.transcriptionSource;
+  const settings = await prisma.botSettings.findUnique({
+    where: { id: 1 },
+    select: { transcriptionSource: true }
+  });
+  return settings?.transcriptionSource ?? 'EXTERNAL_WHISPER';
+}
 
 interface WorkerConfig {
   cookScriptDir: string;
@@ -53,6 +76,10 @@ interface WorkerConfig {
   introExtractionTimeoutMs: number;
   // Stage 6
   recapPostMaxAttempts: number;
+  // Stage 6.5
+  googleApiKey: string | undefined;
+  whisperFallbackDays: number;     // 10 by default
+  whisperStopDays: number;          // 14 by default
 }
 
 interface WorkerHandle {
@@ -115,6 +142,13 @@ export function startWorker(config: WorkerConfig, log: FastifyBaseLogger): Worke
             if (stopped) return;
           }
         }
+
+        // 6. Drive ingest — only runs when poll interval elapsed.
+        if (!stopped) await maybePollDrive(config, log, false);
+
+        // 7. Age check for external_whisper sessions: 10d → switch to gemini,
+        //    14d → NEEDS_REVIEW + admin DM.
+        if (!stopped) await checkWhisperAge(config, log);
       } catch (err) {
         log.error({ err }, 'pipeline worker tick failed');
       } finally {
@@ -163,9 +197,22 @@ async function processOneChapter(config: WorkerConfig, log: FastifyBaseLogger): 
   const recordingId = recordingBasename(chapter.rawDataPath);
   const outputDir = path.join(config.cookedBaseDir, chapter.sessionId, String(chapter.chapterIndex));
 
+  // Stage 6.5: figure out the effective transcription source for this
+  // session. If external_whisper, we still parse .ogg.users + create
+  // AudioFile rows, but we skip the cook.sh invocation since we won't be
+  // sending audio to Gemini for this session.
+  const source = await effectiveTranscriptionSource(chapter.sessionId);
+  const useGemini = source === 'GEMINI';
+
   log.info(
-    { chapterId: chapter.id, sessionId: chapter.sessionId, chapterIndex: chapter.chapterIndex, recordingId },
-    'cooking chapter'
+    {
+      chapterId: chapter.id,
+      sessionId: chapter.sessionId,
+      chapterIndex: chapter.chapterIndex,
+      recordingId,
+      transcriptionSource: source
+    },
+    useGemini ? 'cooking chapter (gemini)' : 'parsing chapter users (external_whisper, no cook)'
   );
 
   await prisma.session.update({
@@ -174,19 +221,7 @@ async function processOneChapter(config: WorkerConfig, log: FastifyBaseLogger): 
   });
 
   try {
-    const result = await cookChapter({
-      cookScriptDir: config.cookScriptDir,
-      recordingId,
-      outputDir,
-      timeoutMs: config.cookTimeoutMs
-    });
-    if (result.cookExitCode !== 0) {
-      throw new Error(`cook.sh exit ${result.cookExitCode}: ${result.cookStderr.slice(-500)}`);
-    }
-    if (result.files.length === 0) {
-      throw new Error('cook.sh produced no FLAC files');
-    }
-
+    // ALWAYS parse .ogg.users — both paths need the user→track mapping.
     const users = await parseOggUsers(chapter.rawUsersPath);
     const userByTrack = new Map(users.map((u) => [u.trackIndex, u]));
     const discordIds = users
@@ -200,8 +235,41 @@ async function processOneChapter(config: WorkerConfig, log: FastifyBaseLogger): 
       : [];
     const internalIdByDiscord = new Map(dbUsers.map((u) => [u.discordUserId, u.id]));
 
+    let cookFiles: Array<{ trackIndex: number; absolutePath: string; fileSizeBytes: number }> = [];
+    if (useGemini) {
+      const result = await cookChapter({
+        cookScriptDir: config.cookScriptDir,
+        recordingId,
+        outputDir,
+        timeoutMs: config.cookTimeoutMs
+      });
+      if (result.cookExitCode !== 0) {
+        throw new Error(`cook.sh exit ${result.cookExitCode}: ${result.cookStderr.slice(-500)}`);
+      }
+      if (result.files.length === 0) {
+        throw new Error('cook.sh produced no FLAC files');
+      }
+      cookFiles = result.files;
+    }
+
+    // For external_whisper, derive a per-track placeholder so we still get
+    // AudioFile rows. cooked_path is set to the would-be path; if the
+    // session is later flipped to gemini, cook.sh runs and overwrites this
+    // entry via the upsert.
+    const trackEntries = useGemini
+      ? cookFiles.map((f) => ({
+          trackIndex: f.trackIndex,
+          absolutePath: f.absolutePath,
+          fileSizeBytes: f.fileSizeBytes
+        }))
+      : users.map((u) => ({
+          trackIndex: u.trackIndex,
+          absolutePath: path.join(outputDir, `${u.trackIndex}.pending.flac`),
+          fileSizeBytes: 0
+        }));
+
     let unknownUserCount = 0;
-    for (const file of result.files) {
+    for (const file of trackEntries) {
       const u = userByTrack.get(file.trackIndex);
       const userId = u?.discordUserId ? internalIdByDiscord.get(u.discordUserId) : undefined;
       if (!userId) unknownUserCount += 1;
@@ -281,19 +349,32 @@ async function processTranscribeBatch(
   triedThisTick: Set<string>
 ): Promise<boolean> {
   const prisma = getPrisma();
-  // Only consider AudioFiles whose chapter is already cooked (processedAt
-  // set). transcribeAttempts caps retries; we filter at the DB level.
-  // Also exclude files we already touched this tick so failures back off
-  // to one attempt per 30s tick instead of burning the retry budget.
+  // Stage 6.5: only pick up AudioFiles for sessions whose effective
+  // transcription source is GEMINI. We don't store the resolved source on
+  // the row, so we filter via a relation. external_whisper sessions skip
+  // this queue entirely — their Transcripts come from driveIngest.
   const batch: TranscribeJob[] = await prisma.audioFile.findMany({
     where: {
       transcript: null,
       transcribeAttempts: { lt: config.transcribeMaxAttempts },
-      chapter: { processedAt: { not: null } },
+      chapter: {
+        processedAt: { not: null },
+        session: {
+          OR: [
+            { transcriptionSource: 'GEMINI' },
+            {
+              transcriptionSource: null,
+              // Inherit from BotSettings — represented by NULL on the
+              // session itself. We can't join a singleton through prisma
+              // findMany, so we filter here and re-check inside.
+            }
+          ]
+        }
+      },
       ...(triedThisTick.size > 0 ? { id: { notIn: Array.from(triedThisTick) } } : {})
     },
     orderBy: { cookedAt: 'asc' },
-    take: config.transcribeConcurrency,
+    take: config.transcribeConcurrency * 2, // overfetch, filter below
     select: {
       id: true,
       cookedPath: true,
@@ -301,20 +382,129 @@ async function processTranscribeBatch(
     }
   });
   if (batch.length === 0) return false;
-  for (const af of batch) triedThisTick.add(af.id);
+
+  // Re-check the effective source inside JS to honor BotSettings global.
+  const filtered: TranscribeJob[] = [];
+  for (const job of batch) {
+    const source = await effectiveTranscriptionSource(job.chapter.sessionId);
+    if (source === 'GEMINI') filtered.push(job);
+    if (filtered.length >= config.transcribeConcurrency) break;
+  }
+  if (filtered.length === 0) return false;
+
+  for (const af of filtered) triedThisTick.add(af.id);
 
   // Bump status to TRANSCRIBING for any session whose AudioFile we're about
   // to touch — but only if still in COOKING (don't downgrade from READY/FAILED).
-  const sessionIds = Array.from(new Set(batch.map((af: TranscribeJob) => af.chapter.sessionId)));
+  const sessionIds = Array.from(new Set(filtered.map((af: TranscribeJob) => af.chapter.sessionId)));
   await prisma.session.updateMany({
     where: { id: { in: sessionIds }, status: 'COOKING' },
     data: { status: 'TRANSCRIBING' }
   });
 
   await Promise.all(
-    batch.map((af: TranscribeJob) => transcribeOne(af.id, af.cookedPath, config, log))
+    filtered.map((af: TranscribeJob) => transcribeOne(af.id, af.cookedPath, config, log))
   );
   return true;
+}
+
+// ---------------------------------------------------------------------------
+// Stage 6.5 — Drive ingest + whisper-age fallback
+// ---------------------------------------------------------------------------
+
+/**
+ * Poll Drive for new whisper transcripts. Respects BotSettings poll interval
+ * unless `force` is true. Exposed externally so /check-drive can call it.
+ */
+export async function maybePollDrive(
+  config: WorkerConfig,
+  log: FastifyBaseLogger,
+  force: boolean
+): Promise<{ ran: boolean; report?: Awaited<ReturnType<typeof pollDriveOnce>> }> {
+  if (!config.googleApiKey) return { ran: false };
+  const prisma = getPrisma();
+  const settings = await prisma.botSettings.findUnique({ where: { id: 1 } });
+  if (!settings?.driveFolderId) return { ran: false };
+
+  if (!force) {
+    const intervalMs = (settings.drivePollIntervalHours ?? 6) * 60 * 60 * 1000;
+    if (settings.driveLastPolledAt) {
+      const sinceLast = Date.now() - settings.driveLastPolledAt.getTime();
+      if (sinceLast < intervalMs) return { ran: false };
+    }
+  }
+
+  log.info({ folderId: settings.driveFolderId, force }, 'polling drive for whisper transcripts');
+  const report = await pollDriveOnce(config.googleApiKey, settings.driveFolderId, log);
+  await prisma.botSettings.update({
+    where: { id: 1 },
+    data: { driveLastPolledAt: new Date() }
+  });
+  log.info({ report }, 'drive poll complete');
+  return { ran: true, report };
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * For external_whisper sessions: after N days without all transcripts in,
+ * flip to gemini (so the user isn't stuck waiting forever). After M days,
+ * give up and require manual review.
+ */
+async function checkWhisperAge(config: WorkerConfig, log: FastifyBaseLogger): Promise<void> {
+  const prisma = getPrisma();
+  // Sessions whose effective source is external_whisper, still incomplete.
+  const candidates = await prisma.session.findMany({
+    where: {
+      status: { in: ['RECEIVING', 'COOKING', 'TRANSCRIBING'] },
+      OR: [
+        { transcriptionSource: 'EXTERNAL_WHISPER' },
+        { transcriptionSource: null }
+      ],
+      endedAt: { not: null }
+    },
+    select: { id: true, recordingId: true, endedAt: true, transcriptionSource: true }
+  });
+
+  for (const s of candidates) {
+    if (!s.endedAt) continue;
+    // Honor the global default for null sessions
+    if (s.transcriptionSource === null) {
+      const settings = await prisma.botSettings.findUnique({
+        where: { id: 1 },
+        select: { transcriptionSource: true }
+      });
+      if (settings?.transcriptionSource !== 'EXTERNAL_WHISPER') continue;
+    }
+    const ageDays = (Date.now() - s.endedAt.getTime()) / DAY_MS;
+    if (ageDays >= config.whisperStopDays) {
+      log.warn(
+        { sessionId: s.id, recordingId: s.recordingId, ageDays },
+        'whisper-age: 14d elapsed without transcripts — moving to NEEDS_REVIEW'
+      );
+      await prisma.session.update({
+        where: { id: s.id },
+        data: { status: 'NEEDS_REVIEW', summarizeError: 'no whisper transcripts after 14 days' }
+      });
+      await notifyAdmin(
+        log,
+        `Session \`${s.id}\` (\`${s.recordingId}\`) has been waiting on whisper transcripts for ${config.whisperStopDays} days and has been moved to NEEDS_REVIEW.`
+      );
+    } else if (ageDays >= config.whisperFallbackDays) {
+      log.warn(
+        { sessionId: s.id, recordingId: s.recordingId, ageDays },
+        'whisper-age: 10d elapsed without transcripts — switching session to gemini'
+      );
+      await prisma.session.update({
+        where: { id: s.id },
+        data: { transcriptionSource: 'GEMINI' }
+      });
+      await notifyAdmin(
+        log,
+        `Session \`${s.id}\` (\`${s.recordingId}\`) had no whisper transcripts after ${config.whisperFallbackDays} days. Switched to Gemini transcription; cook + transcribe will run on the next tick.`
+      );
+    }
+  }
 }
 
 async function transcribeOne(

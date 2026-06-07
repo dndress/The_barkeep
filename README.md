@@ -18,6 +18,8 @@ This repo contains the Barkeep service only. Chronicler lives in its own repo.
 
 **Stage 5 (done):** Once a session's transcripts are all in, the worker runs an end-to-end pipeline: (1) per-track **intro extraction** via Gemini → who's playing what, who's DMing, what game; (2) **reconciliation** with fuzzy campaign matching, multiple fallbacks, and a `NEEDS_REVIEW` exit when ambiguous; (3) **chronological summary + character memories** — segments from all tracks are merged by absolute wall-clock time, labeled with character names, sent in one Gemini call with structured JSON output (`short`, `full`, `key_events`, `character_memories`). Status flow: `TRANSCRIBING → SUMMARIZING → READY` (or `NEEDS_REVIEW`). When something needs manual attention, a **minimal Discord REST-only notifier** DMs the admin user (`ADMIN_DISCORD_USER_ID`) via the Barkeep bot token.
 
+**Stage 6.5 (done):** External Whisper transcripts via Google Drive. **This is now the default.** Workflow: Chronicler still records normally; one player runs Whisper locally on the per-track files; they upload `*.json` files into a per-recording subfolder inside a configured Drive parent folder. The bot polls every 6 hours (or on demand via `/check-drive`), matches each file to its `Session` by recording-id subfolder name and to its `AudioFile` by Discord username in the filename, parses Whisper's segments shape into `Transcript` rows. Cook still parses `.ogg.users` to create `AudioFile` rows; only the actual `cook.sh` audio invocation is skipped when source is external. After 10 days without transcripts the session auto-falls-back to Gemini; after 14 days it moves to `NEEDS_REVIEW`. Per-session override via `/use-gemini-for`. Global flip via `/transcription-source`.
+
 **Stage 6 (done):** Full `discord.js` client replaces the REST-only notifier. Worker grows a fifth drain step that **posts session recaps** as rich embeds to the campaign's text channel at `recap_scheduled_for` (default `Session.endedAt + 10h`), then advances `READY → POSTED`. Three **slash commands** registered guild-scoped: `/tag-session` (admin-only, fix a `NEEDS_REVIEW` session — same fix is one click away via **action buttons** that now ship in every needs-review DM), `/recap` (public, show a past session's short summary in the campaign's channel), `/whodunit` (ephemeral, "who played character X recently"). `Session.sessionNumber` is now auto-assigned the first time we know the session's campaign.
 
 **Not yet:** embeddings + RAG, `/ask` Barkeep persona, voice-channel responses, art generation.
@@ -428,6 +430,64 @@ sudo docker exec -it $(sudo docker ps -qf name=barkeep-db) \
   psql -U barkeep -d barkeep -c \
   "UPDATE sessions SET recap_scheduled_for = NOW() WHERE status = 'ready';"
 #    Within 30s the embed lands in the campaign's text channel.
+```
+
+## Stage 6.5 — Whisper player workflow
+
+The player running Whisper locally should:
+
+1. Wait until Chronicler emits the download link for the session.
+2. Download the ZIP of per-track FLAC files. Each filename looks like `01_dres7234_<chapter>.flac`.
+3. Run Whisper on each FLAC, producing JSON. Suggested command:
+   ```bash
+   whisper 01_dres7234_xxx.flac --language es --output_format json --model medium
+   ```
+   For `faster-whisper`:
+   ```python
+   from faster_whisper import WhisperModel
+   model = WhisperModel('medium', device='cuda', compute_type='float16')
+   segments, info = model.transcribe('01_dres7234_xxx.flac', language='es')
+   # serialize segments and info.language to JSON
+   ```
+4. Each JSON file should have the **same base name** as the FLAC, just with `.json` instead. Don't rename.
+5. In Google Drive, inside the parent folder the bot polls, create a subfolder **named with the recording ID** (Chronicler shows this in the download link / its logs).
+6. Upload all the `.json` files into that subfolder. Make the folder accessible to "anyone with the link" so the API key can read it.
+7. Optionally run `/check-drive` in Discord — otherwise the bot picks them up within 6 hours.
+
+Files the bot can't match (unknown username, no AudioFile yet, etc.) are skipped silently — they'll be retried on the next poll once context exists. If after 10 days the session is still missing transcripts, the bot switches it to Gemini and DMs the admin.
+
+## Stage 6.5 verification checklist
+
+```bash
+# 1. BotSettings row was seeded
+sudo docker exec -it $(sudo docker ps -qf name=barkeep-db) \
+  psql -U barkeep -d barkeep -c \
+  "SELECT id, transcription_source, drive_folder_id, drive_poll_interval_hours
+   FROM bot_settings;"
+# Expect: transcription_source = 'external_whisper' (the new default), drive_folder_id = NULL.
+
+# 2. Slash commands registered
+sudo docker logs $(sudo docker ps -qf name=barkeep | head -1) 2>&1 \
+  | grep "slash commands registered"
+# Expect: count = 7
+
+# 3. Set the Drive folder in Discord:
+#    /drive-folder value:https://drive.google.com/drive/folders/<id>
+#    (admin-only — verifies extraction works for both URL and raw-id input)
+
+# 4. Trigger an immediate poll:
+#    /check-drive
+#    The ephemeral reply shows subfolders/sessions/transcripts counts.
+
+# 5. After a real session + a player uploading whisper JSONs, the worker logs:
+sudo docker logs $(sudo docker ps -qf name=barkeep | head -1) 2>&1 \
+  | grep -E "polling drive|whisper transcript ingested" | tail -20
+
+# 6. Confirm Transcript rows came from Whisper (no gemini_request_id):
+sudo docker exec -it $(sudo docker ps -qf name=barkeep-db) \
+  psql -U barkeep -d barkeep -c \
+  "SELECT count(*), language, gemini_request_id IS NULL AS whisper
+   FROM transcripts GROUP BY language, gemini_request_id IS NULL;"
 ```
 
 ## Next stage

@@ -30,7 +30,7 @@ async function main(): Promise<void> {
   const discordStarted = config.BARKEEP_DISCORD_BOT_TOKEN
     ? startDiscordClient({ token: config.BARKEEP_DISCORD_BOT_TOKEN, log: app.log })
         .then(async (client) => {
-          wireInteractionHandler(client, app.log);
+          wireInteractionHandler(client, app.log, { googleApiKey: config.GOOGLE_API_KEY });
           if (config.DISCORD_GUILD_ID) {
             try {
               await registerSlashCommands(client, config.DISCORD_GUILD_ID, app.log);
@@ -75,7 +75,10 @@ async function main(): Promise<void> {
       shortSummaryWordTarget: config.SHORT_SUMMARY_WORD_TARGET,
       keyEventsTarget: config.KEY_EVENTS_TARGET,
       introExtractionTimeoutMs: config.INTRO_EXTRACTION_TIMEOUT_MS,
-      recapPostMaxAttempts: config.RECAP_POST_MAX_ATTEMPTS
+      recapPostMaxAttempts: config.RECAP_POST_MAX_ATTEMPTS,
+      googleApiKey: config.GOOGLE_API_KEY,
+      whisperFallbackDays: config.WHISPER_FALLBACK_DAYS,
+      whisperStopDays: config.WHISPER_STOP_DAYS
     },
     app.log
   );

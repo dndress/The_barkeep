@@ -52,6 +52,11 @@ const Env = z.object({
   RECAP_DELAY_HOURS: z.coerce.number().int().nonnegative().default(10),
   RECAP_POST_MAX_ATTEMPTS: z.coerce.number().int().positive().default(3),
 
+  // Stage 6.5 — external Whisper via Google Drive
+  GOOGLE_API_KEY: z.string().min(1).optional(),
+  WHISPER_FALLBACK_DAYS: z.coerce.number().int().positive().default(10),
+  WHISPER_STOP_DAYS: z.coerce.number().int().positive().default(14),
+
   NODE_ENV: z.enum(['development', 'production', 'test']).default('production')
 });
 

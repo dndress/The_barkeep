@@ -79,6 +79,10 @@ services:
       DISCORD_GUILD_ID: ${DISCORD_GUILD_ID:-698633790972493855}
       RECAP_DELAY_HOURS: ${RECAP_DELAY_HOURS:-10}
       RECAP_POST_MAX_ATTEMPTS: ${RECAP_POST_MAX_ATTEMPTS:-3}
+      # Stage 6.5 — external Whisper via Google Drive
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+      WHISPER_FALLBACK_DAYS: ${WHISPER_FALLBACK_DAYS:-10}
+      WHISPER_STOP_DAYS: ${WHISPER_STOP_DAYS:-14}
     ports:
       # Exposed for local curl testing. In Dokploy you'll typically route via
       # Traefik instead; can be removed once Chronicler is talking to us

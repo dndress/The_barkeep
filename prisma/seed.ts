@@ -170,6 +170,18 @@ async function seed(): Promise<void> {
     void campaign; // appease ts-unused-vars if defaultDmDiscordUserId becomes unused
   }
 
+  // Stage 6.5 — make sure the singleton BotSettings row exists.
+  // Idempotent: we never overwrite existing values, only create if missing.
+  await prisma.botSettings.upsert({
+    where: { id: 1 },
+    update: {},
+    create: {
+      id: 1,
+      transcriptionSource: 'EXTERNAL_WHISPER',
+      drivePollIntervalHours: 6
+    }
+  });
+
   // Counts for the boot log
   const [campaignCount, userCount, characterCount] = await Promise.all([
     prisma.campaign.count(),
