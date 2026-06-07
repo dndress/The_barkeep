@@ -64,6 +64,17 @@ services:
       TRANSCRIBE_CONCURRENCY: ${TRANSCRIBE_CONCURRENCY:-2}
       TRANSCRIBE_MAX_ATTEMPTS: ${TRANSCRIBE_MAX_ATTEMPTS:-3}
       TRANSCRIBE_TIMEOUT_MS: ${TRANSCRIBE_TIMEOUT_MS:-1200000}
+      # Stage 5 — summarization + intro extraction + character memories
+      SUMMARIZE_MODEL: ${SUMMARIZE_MODEL:-gemini-2.5-flash}
+      SUMMARIZE_LANGUAGE_HINT: ${SUMMARIZE_LANGUAGE_HINT:-es}
+      SUMMARIZE_MAX_ATTEMPTS: ${SUMMARIZE_MAX_ATTEMPTS:-3}
+      SUMMARIZE_TIMEOUT_MS: ${SUMMARIZE_TIMEOUT_MS:-900000}
+      INTRO_EXTRACTION_TIMEOUT_MS: ${INTRO_EXTRACTION_TIMEOUT_MS:-120000}
+      SHORT_SUMMARY_WORD_TARGET: ${SHORT_SUMMARY_WORD_TARGET:-350}
+      KEY_EVENTS_TARGET: ${KEY_EVENTS_TARGET:-8}
+      # Stage 5 — Discord admin notifier (REST-only, no gateway yet)
+      BARKEEP_DISCORD_BOT_TOKEN: ${BARKEEP_DISCORD_BOT_TOKEN:-}
+      ADMIN_DISCORD_USER_ID: ${ADMIN_DISCORD_USER_ID:-}
     ports:
       # Exposed for local curl testing. In Dokploy you'll typically route via
       # Traefik instead; can be removed once Chronicler is talking to us

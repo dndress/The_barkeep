@@ -142,6 +142,9 @@ model Session {
   recapScheduledFor   DateTime?                @map("recap_scheduled_for")
   recapPostedAt       DateTime?                @map("recap_posted_at")
   detectionMethod     CampaignDetectionMethod? @map("detection_method")
+  // Stage 5 (intro extraction + summarization) bookkeeping
+  summarizeAttempts   Int                      @default(0) @map("summarize_attempts")
+  summarizeError      String?                  @map("summarize_error")
   createdAt           DateTime                 @default(now()) @map("created_at")
   updatedAt           DateTime                 @updatedAt @map("updated_at")
 

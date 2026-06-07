@@ -31,7 +31,14 @@ async function main(): Promise<void> {
       transcribeLanguageHint: config.TRANSCRIBE_LANGUAGE_HINT,
       transcribeConcurrency: config.TRANSCRIBE_CONCURRENCY,
       transcribeMaxAttempts: config.TRANSCRIBE_MAX_ATTEMPTS,
-      transcribeTimeoutMs: config.TRANSCRIBE_TIMEOUT_MS
+      transcribeTimeoutMs: config.TRANSCRIBE_TIMEOUT_MS,
+      summarizeModel: config.SUMMARIZE_MODEL,
+      summarizeLanguageHint: config.SUMMARIZE_LANGUAGE_HINT,
+      summarizeMaxAttempts: config.SUMMARIZE_MAX_ATTEMPTS,
+      summarizeTimeoutMs: config.SUMMARIZE_TIMEOUT_MS,
+      shortSummaryWordTarget: config.SHORT_SUMMARY_WORD_TARGET,
+      keyEventsTarget: config.KEY_EVENTS_TARGET,
+      introExtractionTimeoutMs: config.INTRO_EXTRACTION_TIMEOUT_MS
     },
     app.log
   );

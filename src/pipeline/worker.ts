@@ -24,7 +24,11 @@ import path from 'node:path';
 import type { FastifyBaseLogger } from 'fastify';
 
 import { getPrisma } from '../db.js';
+import { notifyAdmin } from '../discord/notifier.js';
 import { cookChapter, recordingBasename } from './cook.js';
+import { extractIntroFromTranscript } from './extractIntros.js';
+import { reconcileSession, type PerTrackExtraction } from './reconcile.js';
+import { summarizeSession } from './summarize.js';
 import { transcribeAudioFile } from './transcribe.js';
 import { parseOggUsers } from './users.js';
 
@@ -38,6 +42,14 @@ interface WorkerConfig {
   transcribeConcurrency: number;
   transcribeMaxAttempts: number;
   transcribeTimeoutMs: number;
+  // Stage 5
+  summarizeModel: string;
+  summarizeLanguageHint: string;
+  summarizeMaxAttempts: number;
+  summarizeTimeoutMs: number;
+  shortSummaryWordTarget: number;
+  keyEventsTarget: number;
+  introExtractionTimeoutMs: number;
 }
 
 interface WorkerHandle {
@@ -76,8 +88,17 @@ export function startWorker(config: WorkerConfig, log: FastifyBaseLogger): Worke
           if (stopped) return;
         }
 
-        // 3. Advance any sessions that finished while we were working
+        // 3. Advance any sessions that finished transcription
         if (!stopped) await advanceCompletedSessions(log);
+
+        // 4. Drain summarize queue (one session per tick — heavy step)
+        if (!stopped) {
+          for (let i = 0; i < 3; i++) {
+            const processed = await processOneSummarize(config, log);
+            if (!processed) break;
+            if (stopped) return;
+          }
+        }
       } catch (err) {
         log.error({ err }, 'pipeline worker tick failed');
       } finally {
@@ -351,10 +372,14 @@ async function transcribeOne(
 // ---------------------------------------------------------------------------
 
 /**
- * Move any TRANSCRIBING session to READY once:
+ * Move any TRANSCRIBING / COOKING session to SUMMARIZING once:
  *   - session.endedAt is set (final chapter received), AND
  *   - every chapter has processedAt set, AND
  *   - every AudioFile has a Transcript.
+ *
+ * Note: previous stages used READY as the "transcripts-done" state. Stage 5
+ * inserts SUMMARIZING between TRANSCRIBING and READY — READY now means
+ * "summary written, ready to post".
  */
 async function advanceCompletedSessions(log: FastifyBaseLogger): Promise<void> {
   const prisma = getPrisma();
@@ -366,8 +391,6 @@ async function advanceCompletedSessions(log: FastifyBaseLogger): Promise<void> {
     select: { id: true }
   });
   for (const { id } of candidates) {
-    // A single negation query is cheap: "is there any chapter or AudioFile
-    // not yet done?". If there's none, the session is ready.
     const unfinishedChapter = await prisma.chapter.findFirst({
       where: { sessionId: id, processedAt: null },
       select: { id: true }
@@ -382,8 +405,284 @@ async function advanceCompletedSessions(log: FastifyBaseLogger): Promise<void> {
 
     await prisma.session.update({
       where: { id },
-      data: { status: 'READY' }
+      data: { status: 'SUMMARIZING' }
     });
-    log.info({ sessionId: id }, 'session ready');
+    log.info({ sessionId: id }, 'session ready for summarization');
   }
+}
+
+// ---------------------------------------------------------------------------
+// Summarize (Stage 5)
+// ---------------------------------------------------------------------------
+
+/**
+ * Pick the oldest SUMMARIZING session and run the full Stage 5 pipeline:
+ *   1. Extract intros from every track (parallel Gemini calls)
+ *   2. Reconcile campaign / DM / character assignments
+ *      - On failure: status → NEEDS_REVIEW, DM admin, stop
+ *   3. Persist SessionPlayer rows + session.campaign_id + dm_user_id
+ *   4. Summarize chronologically + extract character memories (1 Gemini call)
+ *   5. Persist Summary + CharacterMemory rows
+ *   6. status → READY
+ */
+async function processOneSummarize(
+  config: WorkerConfig,
+  log: FastifyBaseLogger
+): Promise<boolean> {
+  const prisma = getPrisma();
+  const session = await prisma.session.findFirst({
+    where: {
+      status: 'SUMMARIZING',
+      summarizeAttempts: { lt: config.summarizeMaxAttempts }
+    },
+    orderBy: { endedAt: 'asc' },
+    include: {
+      chapters: {
+        include: {
+          audioFiles: {
+            include: {
+              transcript: { select: { fullText: true } }
+            }
+          }
+        }
+      }
+    }
+  });
+  if (!session) return false;
+
+  log.info({ sessionId: session.id }, 'starting summarization pipeline');
+
+  // Flatten AudioFiles + their transcripts, one per track per chapter.
+  // For intro extraction we only need ONE transcript per user (typically
+  // the longest), since the user is the same speaker across chapters. We
+  // pick the AudioFile with the most text.
+  interface TrackEntry {
+    audioFileId: string;
+    userId: string | null;
+    trackIndex: number;
+    transcript: string;
+  }
+  const byUser = new Map<string, TrackEntry>();
+  for (const chapter of session.chapters) {
+    for (const af of chapter.audioFiles) {
+      const text = af.transcript?.fullText ?? '';
+      if (!text || !af.userId) continue;
+      const existing = byUser.get(af.userId);
+      if (!existing || text.length > existing.transcript.length) {
+        byUser.set(af.userId, {
+          audioFileId: af.id,
+          userId: af.userId,
+          trackIndex: af.trackIndex,
+          transcript: text
+        });
+      }
+    }
+  }
+  const tracks = Array.from(byUser.values());
+  if (tracks.length === 0) {
+    return await markSummarizeFailed(
+      session.id,
+      'no transcribed tracks with a known user — cannot extract intros',
+      log,
+      config
+    );
+  }
+
+  try {
+    // 1. Extract intros in parallel.
+    log.info({ sessionId: session.id, trackCount: tracks.length }, 'extracting intros');
+    const extractions: PerTrackExtraction[] = await Promise.all(
+      tracks.map(async (t) => {
+        const result = await extractIntroFromTranscript({
+          transcript: t.transcript,
+          model: config.summarizeModel,
+          timeoutMs: config.introExtractionTimeoutMs
+        });
+        return {
+          audioFileId: t.audioFileId,
+          userId: t.userId,
+          trackIndex: t.trackIndex,
+          isDm: result.isDm,
+          characterName: result.characterName,
+          campaignName: result.campaignName,
+          confidence: result.confidence
+        };
+      })
+    );
+
+    // 2. Reconcile.
+    const reconciliation = await reconcileSession({
+      prisma,
+      sessionId: session.id,
+      discordGuildId: session.discordGuildId,
+      extractions
+    });
+
+    if (!reconciliation.success) {
+      log.warn(
+        { sessionId: session.id, reason: reconciliation.reason, diagnostics: reconciliation.diagnostics },
+        'reconciliation failed — flagging session for review'
+      );
+      await prisma.session.update({
+        where: { id: session.id },
+        data: { status: 'NEEDS_REVIEW', summarizeError: reconciliation.reason }
+      });
+      await notifyAdmin(
+        log,
+        `Session needs manual review.\nReason: ${reconciliation.reason}\nSession ID: \`${session.id}\``,
+        { reason: reconciliation.reason, ...reconciliation.diagnostics }
+      );
+      return true;
+    }
+
+    // 3. Persist SessionPlayer rows + session.campaign_id + dm_user_id.
+    await prisma.$transaction(async (tx: Parameters<Parameters<typeof prisma.$transaction>[0]>[0]) => {
+      await tx.sessionPlayer.deleteMany({ where: { sessionId: session.id } });
+      for (const sp of reconciliation.sessionPlayers) {
+        await tx.sessionPlayer.create({
+          data: {
+            sessionId: session.id,
+            userId: sp.userId,
+            characterId: sp.characterId,
+            role: sp.role,
+            trackIndex: sp.trackIndex,
+            detectedFromVoice: sp.detectedFromVoice
+          }
+        });
+      }
+      await tx.session.update({
+        where: { id: session.id },
+        data: {
+          campaignId: reconciliation.campaignId,
+          dmUserId: reconciliation.dmUserId,
+          detectionMethod: 'VOICE_INTRO'
+        }
+      });
+    });
+
+    // 4. Summarize.
+    log.info({ sessionId: session.id }, 'building chronological transcript and summarizing');
+    const summary = await summarizeSession({
+      prisma,
+      sessionId: session.id,
+      model: config.summarizeModel,
+      languageHint: config.summarizeLanguageHint,
+      shortWordTarget: config.shortSummaryWordTarget,
+      keyEventsTarget: config.keyEventsTarget,
+      timeoutMs: config.summarizeTimeoutMs
+    });
+
+    // 5. Persist Summary + CharacterMemory.
+    const sessionPlayersWithChars = await prisma.sessionPlayer.findMany({
+      where: { sessionId: session.id, characterId: { not: null } },
+      include: { character: { select: { id: true, name: true } } }
+    });
+    const characterIdByName = new Map<string, string>();
+    for (const sp of sessionPlayersWithChars) {
+      if (sp.character) characterIdByName.set(sp.character.name, sp.character.id);
+    }
+    const kindMap: Record<string, 'DEED' | 'QUOTE' | 'RELATIONSHIP' | 'WOUND' | 'QUIRK'> = {
+      deed: 'DEED',
+      quote: 'QUOTE',
+      relationship: 'RELATIONSHIP',
+      wound: 'WOUND',
+      quirk: 'QUIRK'
+    };
+
+    let memorySkipCount = 0;
+    await prisma.$transaction(async (tx: Parameters<Parameters<typeof prisma.$transaction>[0]>[0]) => {
+      await tx.summary.deleteMany({ where: { sessionId: session.id } });
+      await tx.summary.create({
+        data: {
+          sessionId: session.id,
+          short: summary.short,
+          full: summary.full,
+          keyEvents: summary.keyEvents as unknown as object
+        }
+      });
+      // Clear prior memories for this session before reinserting (idempotent
+      // on retry).
+      await tx.characterMemory.deleteMany({ where: { sessionId: session.id } });
+      for (const mem of summary.characterMemories) {
+        const charId = characterIdByName.get(mem.characterName);
+        if (!charId) {
+          memorySkipCount += 1;
+          continue;
+        }
+        const kind = kindMap[mem.kind];
+        if (!kind) {
+          memorySkipCount += 1;
+          continue;
+        }
+        await tx.characterMemory.create({
+          data: {
+            characterId: charId,
+            sessionId: session.id,
+            kind,
+            content: mem.content,
+            importance: mem.importance
+          }
+        });
+      }
+      await tx.session.update({
+        where: { id: session.id },
+        data: { status: 'READY', summarizeError: null }
+      });
+    });
+
+    log.info(
+      {
+        sessionId: session.id,
+        shortChars: summary.short.length,
+        fullChars: summary.full.length,
+        keyEvents: summary.keyEvents.length,
+        memoriesWritten: summary.characterMemories.length - memorySkipCount,
+        memorySkipped: memorySkipCount
+      },
+      'session summarized and ready'
+    );
+    return true;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    log.error(
+      { err: message, sessionId: session.id },
+      'summarize pipeline failed — will retry on next tick'
+    );
+    await prisma.session.update({
+      where: { id: session.id },
+      data: {
+        summarizeAttempts: { increment: 1 },
+        summarizeError: message.slice(0, 1000)
+      }
+    });
+    // If we've now exhausted retries, also DM the admin.
+    const updated = await prisma.session.findUnique({
+      where: { id: session.id },
+      select: { summarizeAttempts: true }
+    });
+    if (updated && updated.summarizeAttempts >= config.summarizeMaxAttempts) {
+      await notifyAdmin(
+        log,
+        `Session summarization failed ${updated.summarizeAttempts} times.\nSession ID: \`${session.id}\`\nError: ${message.slice(0, 500)}`
+      );
+    }
+    return true;
+  }
+}
+
+async function markSummarizeFailed(
+  sessionId: string,
+  reason: string,
+  log: FastifyBaseLogger,
+  config: WorkerConfig
+): Promise<boolean> {
+  const prisma = getPrisma();
+  log.warn({ sessionId, reason }, 'summarize pre-check failed');
+  await prisma.session.update({
+    where: { id: sessionId },
+    data: { status: 'NEEDS_REVIEW', summarizeError: reason }
+  });
+  await notifyAdmin(log, `Session ${sessionId} cannot be summarized: ${reason}`);
+  void config; // reserved for future config-dependent behavior
+  return true;
 }

@@ -34,6 +34,19 @@ const Env = z.object({
   TRANSCRIBE_MAX_ATTEMPTS: z.coerce.number().int().positive().default(3),
   TRANSCRIBE_TIMEOUT_MS: z.coerce.number().int().positive().default(20 * 60 * 1000),
 
+  // Stage 5 — intro extraction, summarization, character memories
+  SUMMARIZE_MODEL: z.string().default('gemini-2.5-flash'),
+  SUMMARIZE_LANGUAGE_HINT: z.string().default('es'),
+  SUMMARIZE_MAX_ATTEMPTS: z.coerce.number().int().positive().default(3),
+  SUMMARIZE_TIMEOUT_MS: z.coerce.number().int().positive().default(15 * 60 * 1000),
+  INTRO_EXTRACTION_TIMEOUT_MS: z.coerce.number().int().positive().default(2 * 60 * 1000),
+  SHORT_SUMMARY_WORD_TARGET: z.coerce.number().int().positive().default(350),
+  KEY_EVENTS_TARGET: z.coerce.number().int().positive().default(8),
+
+  // Stage 5 — Discord DM notifications to admin
+  BARKEEP_DISCORD_BOT_TOKEN: z.string().min(1).optional(),
+  ADMIN_DISCORD_USER_ID: z.string().min(1).optional(),
+
   NODE_ENV: z.enum(['development', 'production', 'test']).default('production')
 });
 

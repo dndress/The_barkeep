@@ -14,7 +14,11 @@ This repo contains the Barkeep service only. Chronicler lives in its own repo.
 
 **Stage 4 (done):** `@google/genai` SDK integrated. The worker now also transcribes every cooked `AudioFile` via `gemini-2.5-flash` (Spanish-primary prompt, English allowed for proper nouns / spell names / etc.), writes `Transcript` rows, and advances `Session.status` from `COOKING → TRANSCRIBING → READY` when every chapter is cooked AND every track is transcribed. Up to 2 transcriptions run in parallel; failures retry up to 3 times then park with the error stored on `AudioFile.transcribe_error`.
 
-**Stage 4.5 (done):** Transcription output is now **structured segments** with per-utterance timestamps, not a flat text blob. Each `Transcript` now has a `segments` JSON column of `[{start: number, text: string}]` (seconds from the start of the chapter's audio). The Stage 5 summarizer will use these to interleave tracks chronologically across speakers. `fullText` is still derived (joined from segments) for backward compatibility and quick reads.
+**Stage 4.5 (done):** Transcription output is now **structured segments** with per-utterance timestamps, not a flat text blob. Each `Transcript` now has a `segments` JSON column of `[{start: number, text: string}]` (seconds from the start of the chapter's audio). The Stage 5 summarizer uses these to interleave tracks chronologically across speakers. `fullText` is still derived (joined from segments) for backward compatibility and quick reads.
+
+**Stage 5 (done):** Once a session's transcripts are all in, the worker runs an end-to-end pipeline: (1) per-track **intro extraction** via Gemini → who's playing what, who's DMing, what game; (2) **reconciliation** with fuzzy campaign matching, multiple fallbacks, and a `NEEDS_REVIEW` exit when ambiguous; (3) **chronological summary + character memories** — segments from all tracks are merged by absolute wall-clock time, labeled with character names, sent in one Gemini call with structured JSON output (`short`, `full`, `key_events`, `character_memories`). Status flow: `TRANSCRIBING → SUMMARIZING → READY` (or `NEEDS_REVIEW`). When something needs manual attention, a **minimal Discord REST-only notifier** DMs the admin user (`ADMIN_DISCORD_USER_ID`) via the Barkeep bot token.
+
+**Not yet:** Discord bot (full client, slash commands, the actual recap post), embeddings + RAG, voice-channel responses.
 
 **Not yet:** summarization/embedding, voice-intro extractor, Discord bot, recap scheduler.
 
@@ -267,6 +271,65 @@ sudo docker exec -it $(sudo docker ps -qf name=barkeep-db) \
 # Expect: empty in happy path
 ```
 
+## Stage 5 verification checklist
+
+Stage 5 requires `BARKEEP_DISCORD_BOT_TOKEN` and `ADMIN_DISCORD_USER_ID` in Dokploy env for admin DMs to work. They're optional — without them the pipeline still runs, but `NEEDS_REVIEW` only shows in logs/DB, not in Discord.
+
+After deploying Stage 5, on a real session that completed transcription:
+
+```bash
+# 1. Worker advertises summarization config on boot
+sudo docker logs $(sudo docker ps -qf name=barkeep | head -1) 2>&1 \
+  | grep "pipeline worker started"
+
+# 2. Watch a session move TRANSCRIBING → SUMMARIZING → READY
+sudo docker logs $(sudo docker ps -qf name=barkeep | head -1) 2>&1 \
+  | grep -E "ready for summarization|extracting intros|building chronological|session summarized" | tail -20
+
+# 3. Confirm summary + memories + session_players landed
+sudo docker exec -it $(sudo docker ps -qf name=barkeep-db) \
+  psql -U barkeep -d barkeep -c \
+  "SELECT s.id, s.status, s.campaign_id IS NOT NULL AS has_campaign,
+          s.dm_user_id IS NOT NULL AS has_dm,
+          (SELECT count(*) FROM session_players WHERE session_id = s.id) AS players,
+          (SELECT count(*) FROM summaries WHERE session_id = s.id) AS summaries,
+          (SELECT count(*) FROM character_memory WHERE session_id = s.id) AS memories
+   FROM sessions s ORDER BY s.created_at DESC LIMIT 5;"
+
+# 4. Inspect actual content
+sudo docker exec -it $(sudo docker ps -qf name=barkeep-db) \
+  psql -U barkeep -d barkeep -c \
+  "SELECT substring(short, 1, 400) AS short_preview,
+          jsonb_array_length(key_events) AS event_count
+   FROM summaries ORDER BY generated_at DESC LIMIT 1;"
+
+sudo docker exec -it $(sudo docker ps -qf name=barkeep-db) \
+  psql -U barkeep -d barkeep -c \
+  "SELECT c.name AS character, cm.kind, substring(cm.content, 1, 120) AS content, cm.importance
+   FROM character_memory cm JOIN characters c ON c.id = cm.character_id
+   ORDER BY cm.created_at DESC LIMIT 20;"
+```
+
+## Manually fixing a `NEEDS_REVIEW` session
+
+If reconciliation flagged the session, the admin DM tells you the reason. To recover:
+
+```sql
+-- Look up the right campaign_id manually
+SELECT id, name FROM campaigns;
+
+-- Patch the session
+UPDATE sessions
+   SET campaign_id = '<the right uuid>',
+       dm_user_id  = (SELECT id FROM users WHERE display_name = 'David Mora'),
+       status      = 'SUMMARIZING',
+       summarize_attempts = 0,
+       summarize_error    = NULL
+ WHERE id = '<session uuid>';
+```
+
+The worker picks it back up on the next 30s tick. If it succeeds, status moves to `READY`.
+
 ## Re-transcribing existing data with segments (Stage 4.5)
 
 `Transcript` rows from before Stage 4.5 have `segments = NULL`. To re-transcribe them with the new structured output (so Stage 5 can use timing info):
@@ -305,6 +368,18 @@ WHERE id = '<audio-file-uuid>';
 
 The worker picks it back up on the next 30-second tick.
 
+## Important deployment note (any env var)
+
+Any new env var I add gets threaded through `docker-compose.yml`'s `environment:` block via `${VAR:-default}`. Dokploy's Environment tab alone is NOT enough — without the compose plumbing, Dokploy sets the var in its project state but Docker never injects it into the container. Verify with:
+
+```bash
+sudo docker inspect $(sudo docker ps -qf name=barkeep | head -1) \
+  --format '{{range .Config.Env}}{{println .}}{{end}}' | grep <VAR_NAME>
+```
+
 ## Next stage
 
-Stage 5: voice-intro extraction + session summarization. Each finished session's first ~3 minutes of each track gets parsed for "I'm X playing Y / I'm DMing tonight / we're playing Z" → writes `session_players` + `session.campaign_id` + `session.dm_user_id`. Then the full set of transcripts is fed to `gemini-2.5-flash` for a structured `Summary` (short paragraph + detailed `key_events` JSON + per-character notable items → `CharacterMemory`).
+Stage 6: full Discord bot. Replaces the REST-only notifier with a `discord.js` client that:
+- Posts the `short` summary + art to the campaign's text channel at `recap_scheduled_for` (Session.endedAt + 10h)
+- Listens for `/ask <question>` slash commands and answers in-character via RAG (after Stage 7 adds embeddings)
+- Listens for `/tag-session <campaign> [<dm>]` so you can fix `NEEDS_REVIEW` from Discord instead of SQL.
