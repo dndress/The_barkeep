@@ -25,13 +25,19 @@ const SegmentSchema = z
   })
   .passthrough();
 
-const WhisperJsonSchema = z
+// We accept two shapes from Whisper-style pipelines:
+//   1. OpenAI Whisper native:   { segments: [...], language: "es", text: "..." }
+//   2. Bare array (faster-whisper-style export):  [ {start, end, text, confidence}, ... ]
+// `confidence` and other extra fields are ignored via passthrough.
+const ObjectShape = z
   .object({
     segments: z.array(SegmentSchema),
     language: z.string().optional(),
     text: z.string().optional()
   })
   .passthrough();
+const ArrayShape = z.array(SegmentSchema);
+const WhisperJsonSchema = z.union([ObjectShape, ArrayShape]);
 
 export interface ParsedWhisperOutput {
   segments: TranscribeSegment[];
@@ -54,18 +60,24 @@ export function parseWhisperJsonString(content: string): ParsedWhisperOutput {
     throw new Error(`whisperJson: schema validation failed: ${issues}`);
   }
 
-  const segments: TranscribeSegment[] = validated.data.segments
+  // Normalize: both shapes feed into the same segments-array path.
+  const isArray = Array.isArray(validated.data);
+  const rawSegments = isArray ? validated.data : validated.data.segments;
+  const declaredLanguage = isArray ? undefined : validated.data.language;
+  const declaredText = isArray ? undefined : validated.data.text;
+
+  const segments: TranscribeSegment[] = rawSegments
     .map((s) => ({ start: s.start, text: s.text.trim() }))
     .filter((s) => s.text.length > 0)
     .sort((a, b) => a.start - b.start);
 
   const fullText =
-    validated.data.text?.trim() || segments.map((s) => s.text).join(' ');
+    declaredText?.trim() || segments.map((s) => s.text).join(' ');
 
   return {
     segments,
     fullText,
-    language: validated.data.language
+    language: declaredLanguage
   };
 }
 
