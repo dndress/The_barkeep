@@ -60,16 +60,26 @@ export function parseWhisperJsonString(content: string): ParsedWhisperOutput {
     throw new Error(`whisperJson: schema validation failed: ${issues}`);
   }
 
-  // Normalize: both shapes feed into the same segments-array path.
-  const isArray = Array.isArray(validated.data);
-  const rawSegments = isArray ? validated.data : validated.data.segments;
-  const declaredLanguage = isArray ? undefined : validated.data.language;
-  const declaredText = isArray ? undefined : validated.data.text;
+  // Normalize: both shapes feed into the same segments-array path. We use
+  // Array.isArray inline so TS narrows the union in each branch.
+  interface RawSeg { start: number; text: string }
+  let rawSegments: RawSeg[];
+  let declaredLanguage: string | undefined;
+  let declaredText: string | undefined;
+  if (Array.isArray(validated.data)) {
+    rawSegments = validated.data;
+    declaredLanguage = undefined;
+    declaredText = undefined;
+  } else {
+    rawSegments = validated.data.segments;
+    declaredLanguage = validated.data.language;
+    declaredText = validated.data.text;
+  }
 
   const segments: TranscribeSegment[] = rawSegments
-    .map((s) => ({ start: s.start, text: s.text.trim() }))
-    .filter((s) => s.text.length > 0)
-    .sort((a, b) => a.start - b.start);
+    .map((s: RawSeg) => ({ start: s.start, text: s.text.trim() }))
+    .filter((s: TranscribeSegment) => s.text.length > 0)
+    .sort((a: TranscribeSegment, b: TranscribeSegment) => a.start - b.start);
 
   const fullText =
     declaredText?.trim() || segments.map((s) => s.text).join(' ');
