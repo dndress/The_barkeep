@@ -13,6 +13,7 @@ import * as transcriptionSource from '../commands/transcriptionSource.js';
 import * as driveFolder from '../commands/driveFolder.js';
 import { makeExecute as makeCheckDriveExecute, data as checkDriveData } from '../commands/checkDrive.js';
 import * as useGeminiFor from '../commands/useGeminiFor.js';
+import { makeExecute as makeAskExecute, data as askData } from '../commands/ask.js';
 import { handleNeedsReviewButton, isNeedsReviewButton } from './needsReviewButtons.js';
 
 interface CommandModule {
@@ -22,6 +23,12 @@ interface CommandModule {
 
 export interface InteractionHandlerDeps {
   googleApiKey: string | undefined;
+  // Stage 7
+  embedModel: string;
+  askModel: string;
+  askTopK: number;
+  embedTimeoutMs: number;
+  askTimeoutMs: number;
 }
 
 export function wireInteractionHandler(
@@ -36,7 +43,17 @@ export function wireInteractionHandler(
     'transcription-source': transcriptionSource,
     'drive-folder': driveFolder,
     [checkDriveData.name]: { execute: makeCheckDriveExecute({ log, googleApiKey: deps.googleApiKey }) },
-    'use-gemini-for': useGeminiFor
+    'use-gemini-for': useGeminiFor,
+    [askData.name]: {
+      execute: makeAskExecute({
+        log,
+        embedModel: deps.embedModel,
+        askModel: deps.askModel,
+        topK: deps.askTopK,
+        embedTimeoutMs: deps.embedTimeoutMs,
+        askTimeoutMs: deps.askTimeoutMs
+      })
+    }
   };
   client.on('interactionCreate', async (interaction: Interaction) => {
     try {

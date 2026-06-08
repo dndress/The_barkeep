@@ -17,6 +17,7 @@ import { data as transcriptionSourceData } from './transcriptionSource.js';
 import { data as driveFolderData } from './driveFolder.js';
 import { data as checkDriveData } from './checkDrive.js';
 import { data as useGeminiForData } from './useGeminiFor.js';
+import { data as askData } from './ask.js';
 
 export async function registerSlashCommands(
   client: Client,
@@ -34,7 +35,8 @@ export async function registerSlashCommands(
     transcriptionSourceData.toJSON(),
     driveFolderData.toJSON(),
     checkDriveData.toJSON(),
-    useGeminiForData.toJSON()
+    useGeminiForData.toJSON(),
+    askData.toJSON()
   ];
   await guild.commands.set(commands);
   log.info({ guildId, count: commands.length }, 'slash commands registered');

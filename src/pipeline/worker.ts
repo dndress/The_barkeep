@@ -27,6 +27,7 @@ import { getPrisma } from '../db.js';
 import { notifyAdmin, notifyAdminNeedsReview } from '../discord/notifier.js';
 import { cookChapter, recordingBasename } from './cook.js';
 import { pollDriveOnce } from './driveIngest.js';
+import { embedSession } from './embedSession.js';
 import { extractIntroFromTranscript } from './extractIntros.js';
 import { reconcileSession, type PerTrackExtraction } from './reconcile.js';
 import { postOneScheduledRecap } from './recapPoster.js';
@@ -80,6 +81,10 @@ interface WorkerConfig {
   googleApiKey: string | undefined;
   whisperFallbackDays: number;     // 10 by default
   whisperStopDays: number;          // 14 by default
+  // Stage 7
+  embedModel: string;
+  embedMaxAttempts: number;
+  embedTimeoutMs: number;
 }
 
 interface WorkerHandle {
@@ -149,6 +154,16 @@ export function startWorker(config: WorkerConfig, log: FastifyBaseLogger): Worke
         // 7. Age check for external_whisper sessions: 10d → switch to gemini,
         //    14d → NEEDS_REVIEW + admin DM.
         if (!stopped) await checkWhisperAge(config, log);
+
+        // 8. Embed drain — for sessions where the recap has been posted
+        //    but chunks haven't been generated yet.
+        if (!stopped) {
+          for (let i = 0; i < 2; i++) {
+            const processed = await embedOneSession(config, log);
+            if (!processed) break;
+            if (stopped) return;
+          }
+        }
       } catch (err) {
         log.error({ err }, 'pipeline worker tick failed');
       } finally {
@@ -887,6 +902,49 @@ async function processOneSummarize(
         `Session summarization failed ${updated.summarizeAttempts} times.\nSession ID: \`${session.id}\`\nError: ${message.slice(0, 500)}`
       );
     }
+    return true;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Stage 7 — embed drain
+// ---------------------------------------------------------------------------
+
+async function embedOneSession(config: WorkerConfig, log: FastifyBaseLogger): Promise<boolean> {
+  const prisma = getPrisma();
+  const session = await prisma.session.findFirst({
+    where: {
+      status: 'POSTED',
+      embeddedAt: null,
+      embedAttempts: { lt: config.embedMaxAttempts }
+    },
+    orderBy: { recapPostedAt: 'asc' },
+    select: { id: true }
+  });
+  if (!session) return false;
+
+  log.info({ sessionId: session.id }, 'embedding session');
+  try {
+    const result = await embedSession(
+      { sessionId: session.id, model: config.embedModel, timeoutMs: config.embedTimeoutMs },
+      log
+    );
+    await prisma.session.update({
+      where: { id: session.id },
+      data: { embeddedAt: new Date(), embedError: null }
+    });
+    log.info({ sessionId: session.id, chunks: result.written }, 'session embedded');
+    return true;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    log.error({ err: message, sessionId: session.id }, 'embed failed');
+    await prisma.session.update({
+      where: { id: session.id },
+      data: {
+        embedAttempts: { increment: 1 },
+        embedError: message.slice(0, 1000)
+      }
+    });
     return true;
   }
 }

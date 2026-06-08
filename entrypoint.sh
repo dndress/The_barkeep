@@ -15,6 +15,25 @@ set -eu
 echo "[entrypoint] syncing schema (prisma db push)..."
 npx prisma db push --skip-generate
 
+# Stage 7: HNSW index on chunks.embedding so /ask is fast even after
+# many sessions. Idempotent — pg ignores duplicates with IF NOT EXISTS.
+# We use vector_cosine_ops to match the ask-time cosine-distance query.
+echo "[entrypoint] ensuring HNSW index on chunks.embedding..."
+node -e "
+const { PrismaClient } = require('@prisma/client');
+const p = new PrismaClient();
+(async () => {
+  try {
+    await p.\$executeRawUnsafe(\`CREATE INDEX IF NOT EXISTS chunks_embedding_hnsw_idx ON chunks USING hnsw (embedding vector_cosine_ops);\`);
+    console.log('hnsw index ok');
+  } catch (e) {
+    console.warn('hnsw index step failed (continuing):', e.message);
+  } finally {
+    await p.\$disconnect();
+  }
+})();
+"
+
 echo "[entrypoint] running seed..."
 npx prisma db seed
 

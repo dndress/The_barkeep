@@ -177,6 +177,11 @@ model Session {
   // First time the Drive ingester looked for transcripts for this session.
   // Used to drive the 10-day Gemini fallback + 14-day stop.
   transcriptIngestFirstCheckedAt DateTime?           @map("transcript_ingest_first_checked_at")
+  // Stage 7 (embedding) bookkeeping. Embedding runs once after the recap
+  // is POSTED, so the chunks are durable + searchable.
+  embeddedAt           DateTime?  @map("embedded_at")
+  embedAttempts        Int        @default(0) @map("embed_attempts")
+  embedError           String?    @map("embed_error")
   createdAt           DateTime                 @default(now()) @map("created_at")
   updatedAt           DateTime                 @updatedAt @map("updated_at")
 
@@ -285,25 +290,42 @@ model Transcript {
   @@map("transcripts")
 }
 
+// Stage 7 — where a chunk came from. Used at retrieval time to optionally
+// boost certain source types and to label retrieved fragments in the
+// persona prompt ("a bard's account" vs "a barkeep's recollection").
+enum ChunkSource {
+  TRANSCRIPT        @map("transcript")
+  SUMMARY_SHORT     @map("summary_short")
+  SUMMARY_FULL      @map("summary_full")
+  KEY_EVENT         @map("key_event")
+  CHARACTER_MEMORY  @map("character_memory")
+}
+
 model Chunk {
-  id          String   @id @default(uuid())
-  sessionId   String   @map("session_id")
-  chapterId   String   @map("chapter_id")
-  userId      String?  @map("user_id")
-  characterId String?  @map("character_id")
+  id          String       @id @default(uuid())
+  sessionId   String       @map("session_id")
+  // Stage 7: chapterId is nullable now — summary/memory chunks aren't
+  // tied to a single chapter.
+  chapterId   String?      @map("chapter_id")
+  userId      String?      @map("user_id")
+  characterId String?      @map("character_id")
+  source      ChunkSource  @default(TRANSCRIPT)
   text        String
-  tsStartSec  Int      @map("ts_start_sec")
-  tsEndSec    Int      @map("ts_end_sec")
+  tokenCount  Int          @default(0) @map("token_count")
+  // Time offsets only meaningful for TRANSCRIPT chunks.
+  tsStartSec  Int          @default(0) @map("ts_start_sec")
+  tsEndSec    Int          @default(0) @map("ts_end_sec")
   // pgvector column. 768 dims matches Gemini text-embedding-004.
   embedding   Unsupported("vector(768)")?
-  createdAt   DateTime @default(now()) @map("created_at")
+  createdAt   DateTime     @default(now()) @map("created_at")
 
   session   Session    @relation(fields: [sessionId], references: [id], onDelete: Cascade)
-  chapter   Chapter    @relation(fields: [chapterId], references: [id], onDelete: Cascade)
+  chapter   Chapter?   @relation(fields: [chapterId], references: [id], onDelete: Cascade)
   user      User?      @relation(fields: [userId], references: [id])
   character Character? @relation(fields: [characterId], references: [id])
 
   @@index([sessionId])
+  @@index([source])
   @@map("chunks")
 }
 

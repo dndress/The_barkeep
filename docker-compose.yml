@@ -83,6 +83,13 @@ services:
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
       WHISPER_FALLBACK_DAYS: ${WHISPER_FALLBACK_DAYS:-10}
       WHISPER_STOP_DAYS: ${WHISPER_STOP_DAYS:-14}
+      # Stage 7 — embeddings + /ask
+      EMBED_MODEL: ${EMBED_MODEL:-text-embedding-004}
+      EMBED_MAX_ATTEMPTS: ${EMBED_MAX_ATTEMPTS:-3}
+      EMBED_TIMEOUT_MS: ${EMBED_TIMEOUT_MS:-600000}
+      ASK_MODEL: ${ASK_MODEL:-gemini-2.5-pro}
+      ASK_TOP_K: ${ASK_TOP_K:-10}
+      ASK_TIMEOUT_MS: ${ASK_TIMEOUT_MS:-60000}
     ports:
       # Exposed for local curl testing. In Dokploy you'll typically route via
       # Traefik instead; can be removed once Chronicler is talking to us
