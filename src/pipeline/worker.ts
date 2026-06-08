@@ -27,6 +27,11 @@ import { getPrisma } from '../db.js';
 import { notifyAdmin, notifyAdminNeedsReview } from '../discord/notifier.js';
 import { cookChapter, recordingBasename } from './cook.js';
 import { pollDriveOnce } from './driveIngest.js';
+import {
+  ensureSessionSubfolder,
+  isDriveWriteConfigured,
+  writeSessionManifest
+} from './driveSetup.js';
 import { embedSession } from './embedSession.js';
 import { extractIntroFromTranscript } from './extractIntros.js';
 import { reconcileSession, type PerTrackExtraction } from './reconcile.js';
@@ -143,6 +148,17 @@ export function startWorker(config: WorkerConfig, log: FastifyBaseLogger): Worke
               { maxAttempts: config.recapPostMaxAttempts },
               log
             );
+            if (!processed) break;
+            if (stopped) return;
+          }
+        }
+
+        // 5.5. Drive setup (Stage 7.5) — create per-session subfolder +
+        // manifest for any external_whisper session that doesn't have one
+        // yet. Cheap, idempotent.
+        if (!stopped) {
+          for (let i = 0; i < 5; i++) {
+            const processed = await setupOneSessionDrive(log);
             if (!processed) break;
             if (stopped) return;
           }
@@ -902,6 +918,86 @@ async function processOneSummarize(
         `Session summarization failed ${updated.summarizeAttempts} times.\nSession ID: \`${session.id}\`\nError: ${message.slice(0, 500)}`
       );
     }
+    return true;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Stage 7.5 — Drive subfolder + manifest creation
+// ---------------------------------------------------------------------------
+
+async function setupOneSessionDrive(log: FastifyBaseLogger): Promise<boolean> {
+  if (!isDriveWriteConfigured()) return false;
+  const prisma = getPrisma();
+  const settings = await prisma.botSettings.findUnique({ where: { id: 1 } });
+  if (!settings?.driveFolderId) return false;
+
+  const session = await prisma.session.findFirst({
+    where: {
+      driveSubfolderId: null,
+      driveSetupAttempts: { lt: 3 },
+      OR: [
+        { transcriptionSource: 'EXTERNAL_WHISPER' },
+        { transcriptionSource: null }
+      ]
+    },
+    orderBy: { createdAt: 'asc' },
+    select: {
+      id: true,
+      recordingId: true,
+      startedAt: true,
+      endedAt: true,
+      transcriptionSource: true
+    }
+  });
+  if (!session) return false;
+
+  // If the session is null-sourced, honor the global setting; bail if
+  // it's not external_whisper.
+  if (session.transcriptionSource === null) {
+    if (settings.transcriptionSource !== 'EXTERNAL_WHISPER') return true; // skip, but consume tick
+  }
+
+  try {
+    const subfolder = await ensureSessionSubfolder(settings.driveFolderId, session.recordingId);
+    await writeSessionManifest(settings.driveFolderId, {
+      recordingId: session.recordingId,
+      subfolderId: subfolder.id,
+      subfolderUrl: subfolder.url,
+      startedAt: session.startedAt,
+      endedAt: session.endedAt
+    });
+    await prisma.session.update({
+      where: { id: session.id },
+      data: {
+        driveSubfolderId: subfolder.id,
+        driveManifestWrittenAt: new Date(),
+        driveSetupError: null
+      }
+    });
+    log.info(
+      {
+        sessionId: session.id,
+        recordingId: session.recordingId,
+        subfolderId: subfolder.id,
+        subfolderUrl: subfolder.url
+      },
+      'drive subfolder + manifest created'
+    );
+    return true;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    log.error(
+      { err: message, sessionId: session.id, recordingId: session.recordingId },
+      'drive setup failed'
+    );
+    await prisma.session.update({
+      where: { id: session.id },
+      data: {
+        driveSetupAttempts: { increment: 1 },
+        driveSetupError: message.slice(0, 1000)
+      }
+    });
     return true;
   }
 }

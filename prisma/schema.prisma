@@ -182,6 +182,12 @@ model Session {
   embeddedAt           DateTime?  @map("embedded_at")
   embedAttempts        Int        @default(0) @map("embed_attempts")
   embedError           String?    @map("embed_error")
+  // Stage 7.5 (Drive scaffolding) — when external_whisper, the bot creates
+  // a Drive subfolder + manifest file so N8N/Kaggle can pick up the work.
+  driveSubfolderId        String?   @map("drive_subfolder_id")
+  driveManifestWrittenAt  DateTime? @map("drive_manifest_written_at")
+  driveSetupAttempts      Int       @default(0) @map("drive_setup_attempts")
+  driveSetupError         String?   @map("drive_setup_error")
   createdAt           DateTime                 @default(now()) @map("created_at")
   updatedAt           DateTime                 @updatedAt @map("updated_at")
 

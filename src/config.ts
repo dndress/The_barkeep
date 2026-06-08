@@ -57,6 +57,9 @@ const Env = z.object({
   WHISPER_FALLBACK_DAYS: z.coerce.number().int().positive().default(10),
   WHISPER_STOP_DAYS: z.coerce.number().int().positive().default(14),
 
+  // Stage 7.5 — Drive write access (service account JSON content)
+  GOOGLE_SERVICE_ACCOUNT_JSON: z.string().min(1).optional(),
+
   // Stage 7 — embeddings + /ask
   EMBED_MODEL: z.string().default('text-embedding-004'),
   EMBED_MAX_ATTEMPTS: z.coerce.number().int().positive().default(3),

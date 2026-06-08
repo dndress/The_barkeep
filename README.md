@@ -18,6 +18,8 @@ This repo contains the Barkeep service only. Chronicler lives in its own repo.
 
 **Stage 5 (done):** Once a session's transcripts are all in, the worker runs an end-to-end pipeline: (1) per-track **intro extraction** via Gemini → who's playing what, who's DMing, what game; (2) **reconciliation** with fuzzy campaign matching, multiple fallbacks, and a `NEEDS_REVIEW` exit when ambiguous; (3) **chronological summary + character memories** — segments from all tracks are merged by absolute wall-clock time, labeled with character names, sent in one Gemini call with structured JSON output (`short`, `full`, `key_events`, `character_memories`). Status flow: `TRANSCRIBING → SUMMARIZING → READY` (or `NEEDS_REVIEW`). When something needs manual attention, a **minimal Discord REST-only notifier** DMs the admin user (`ADMIN_DISCORD_USER_ID`) via the Barkeep bot token.
 
+**Stage 7.5 (done):** Drive scaffolding for the N8N + Kaggle workflow. When a new external_whisper session arrives, the worker creates a per-recording subfolder in the configured Drive parent and writes a `pending/<recording_id>.txt` manifest. Format: `recording_id`, `folder_id`, `folder_url`, `started_at`, `ended_at`. N8N watches `pending/` and triggers the Kaggle faster-whisper pipeline. Kaggle uploads JSONs back into the recording-id subfolder. The bot's existing 6-hour poll ingests them. Requires `GOOGLE_SERVICE_ACCOUNT_JSON` env (service account JSON key); the parent folder must be shared with the SA's `client_email`.
+
 **Stage 7 (done):** Embeddings + `/ask`. After a session moves to `POSTED`, the worker chunks every transcript (by speaker turn, ~400 tokens each), the short and full summary, all key events, and all character memories — embeds them via Gemini `text-embedding-004` and writes them to `chunks` with a `source` enum tagging where they came from. `/ask question:<text>` runs from any campaign channel: embeds the question, vector-searches the campaign's chunks via pgvector cosine distance (HNSW-indexed), resolves the asker's current character from their Discord ID, builds a system prompt framing retrieved chunks as bards' tales, calls `gemini-2.5-pro` at temp 0.7, and posts a public embed signed as the Barkeep with a small footer counting how many sessions and fragments were involved.
 
 **Stage 6.5 (done):** External Whisper transcripts via Google Drive. **This is now the default.** Workflow: Chronicler still records normally; one player runs Whisper locally on the per-track files; they upload `*.json` files into a per-recording subfolder inside a configured Drive parent folder. The bot polls every 6 hours (or on demand via `/check-drive`), matches each file to its `Session` by recording-id subfolder name and to its `AudioFile` by Discord username in the filename, parses Whisper's segments shape into `Transcript` rows. Cook still parses `.ogg.users` to create `AudioFile` rows; only the actual `cook.sh` audio invocation is skipped when source is external. After 10 days without transcripts the session auto-falls-back to Gemini; after 14 days it moves to `NEEDS_REVIEW`. Per-session override via `/use-gemini-for`. Global flip via `/transcription-source`.
@@ -527,6 +529,55 @@ DELETE FROM chunks WHERE session_id = '<uuid>';
 ```
 
 Worker picks it up on the next tick.
+
+## Stage 7.5 — Service account setup for Drive write
+
+The bot needs WRITE access to the Drive parent folder to create subfolders + manifest files. Read-only API key alone isn't enough.
+
+**One-time setup:**
+
+1. Google Cloud Console → IAM & Admin → Service Accounts → **Create service account**. Name it something like `barkeep-drive`. Skip the "grant roles" step (no IAM role needed).
+2. On the new SA, **Keys → Add key → Create new key → JSON**. Download the file. **Keep it private** — it's the credential.
+3. Open the JSON and note the `client_email` value (looks like `barkeep-drive@yourproject.iam.gserviceaccount.com`).
+4. In Drive, right-click your parent folder → **Share** → paste the SA email → set role to **Editor**.
+5. In Dokploy → Barkeep → Environment, add:
+
+   ```
+   GOOGLE_SERVICE_ACCOUNT_JSON=<paste the entire JSON content as one line>
+   ```
+   
+   The JSON has newlines in `private_key`; Dokploy stores it fine. If you have trouble pasting multi-line, replace literal newlines with `\n` (the bot's JSON parser handles both).
+6. Redeploy. Within ~6 hours of any new session, you'll see `drive subfolder + manifest created` in the logs.
+
+**Manifest file shape** (what N8N reads):
+
+```
+recording_id: Jj06IKyoOlQ0
+folder_id: 1aBCdef...
+folder_url: https://drive.google.com/drive/folders/1aBCdef...
+started_at: 2026-06-08T00:56:00Z
+ended_at: 2026-06-08T04:32:00Z
+```
+
+Easiest to parse line-by-line on `:` in N8N's "Read Text File" + "Code" nodes.
+
+## Stage 7.5 verification
+
+```bash
+# After a Chronicler webhook arrives for a new session, within a few ticks:
+sudo docker logs $(sudo docker ps -qf name=barkeep | head -1) 2>&1 \
+  | grep "drive subfolder" | tail -3
+
+# DB confirms the subfolder ID + manifest write time
+sudo docker exec -it $(sudo docker ps -qf name=barkeep-db) \
+  psql -U barkeep -d barkeep -c \
+  "SELECT recording_id, drive_subfolder_id, drive_manifest_written_at
+   FROM sessions ORDER BY created_at DESC LIMIT 5;"
+
+# In Drive, you should see:
+#   pending/<recording_id>.txt
+#   <recording_id>/   (the empty subfolder waiting for transcripts)
+```
 
 ## Next stage
 

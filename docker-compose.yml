@@ -83,6 +83,8 @@ services:
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
       WHISPER_FALLBACK_DAYS: ${WHISPER_FALLBACK_DAYS:-10}
       WHISPER_STOP_DAYS: ${WHISPER_STOP_DAYS:-14}
+      # Stage 7.5 — service account JSON for Drive WRITE (folder + manifest)
+      GOOGLE_SERVICE_ACCOUNT_JSON: ${GOOGLE_SERVICE_ACCOUNT_JSON:-}
       # Stage 7 — embeddings + /ask
       EMBED_MODEL: ${EMBED_MODEL:-text-embedding-004}
       EMBED_MAX_ATTEMPTS: ${EMBED_MAX_ATTEMPTS:-3}
