@@ -100,7 +100,7 @@ const CAMPAIGNS: SeedCampaign[] = [
       { ownerDiscordUserId: '357479840443793408', name: 'Jago',              race: 'Hobgoblin', classOrRole: 'Champion' },
       { ownerDiscordUserId: '394878699520000020', name: 'Brok Greystone',    race: 'Human',     classOrRole: 'Barbarian' },
       { ownerDiscordUserId: '700033531946205255', name: 'Tippi Bellyspark',  race: 'Gnome',     classOrRole: 'Alchemist' },
-      { ownerDiscordUserId: '1020800023350489108', name: 'Silas BlackRobbed', race: 'Elf',      classOrRole: 'Cleric' },
+      { ownerDiscordUserId: '1020800023350489108', name: 'Brokk Spellforge', race: 'Dwarf',      classOrRole: 'Wizard' },
       { ownerDiscordUserId: '925758694799572992',  name: 'Sari Nueve-Vidas', race: 'Catfolk',   classOrRole: 'Swashbuckler' }
     ]
   }
