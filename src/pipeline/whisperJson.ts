@@ -98,19 +98,21 @@ export async function parseWhisperJsonFile(filePath: string): Promise<ParsedWhis
 
 /**
  * Extract a Discord username from a Chronicler-style cook filename.
- * Cook emits names like "01_dres7234_chapter_info.flac" — the username is
- * the second underscore-separated token. We ignore the chapter suffix.
- * Returns null on filenames that don't match.
+ * Cook emits names like "<track>_<username>_<chapter_meta>.<ext>" — we
+ * grab everything between the FIRST and LAST underscore. This handles
+ * usernames that start with an underscore (e.g. "_danielgallego") which
+ * a plain split('_') would mangle into an empty middle element.
+ *
+ * Returns null when the filename doesn't have at least two underscores
+ * (in which case it isn't a Chronicler cook output).
  */
 export function extractDiscordUsernameFromCookFilename(filename: string): string | null {
-  // Strip extension first
   const dot = filename.lastIndexOf('.');
   const base = dot === -1 ? filename : filename.slice(0, dot);
-  const parts = base.split('_');
-  if (parts.length < 2) return null;
-  // parts[0] is track number; parts[1] is username (alphanumeric/underscores per Chronicler's sanitization).
-  // If parts[1] is missing or empty, bail.
-  const username = parts[1]?.trim();
+  const first = base.indexOf('_');
+  const last = base.lastIndexOf('_');
+  if (first === -1 || first === last) return null;
+  const username = base.slice(first + 1, last).trim();
   if (!username) return null;
   return username;
 }

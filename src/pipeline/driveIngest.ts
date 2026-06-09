@@ -170,12 +170,32 @@ export async function pollDriveOnce(
         report.filesSkipped += 1;
         continue;
       }
-      // discordUsername isn't a @unique column in the schema (Discord
-      // usernames can technically be reassigned), so we findFirst.
-      const dbUser = await prisma.user.findFirst({
+      // Try exact match first. discordUsername isn't @unique in the schema
+      // (Discord usernames can technically be reassigned), so we findFirst.
+      let dbUser = await prisma.user.findFirst({
         where: { discordUsername: username },
         select: { id: true, displayName: true }
       });
+      // Fallback: normalize (lowercase + strip leading non-alphanumeric)
+      // and compare. Catches cases where Chronicler's filename sanitization
+      // drops a leading "." (e.g. ".dmorar" in the DB → "dmorar" in the
+      // filename) and the reverse.
+      if (!dbUser) {
+        const normalize = (s: string): string =>
+          s.toLowerCase().replace(/^[^a-z0-9]+/, '');
+        const wanted = normalize(username);
+        const all = await prisma.user.findMany({
+          select: { id: true, displayName: true, discordUsername: true }
+        });
+        const match = all.find((u) => normalize(u.discordUsername) === wanted);
+        if (match) {
+          dbUser = { id: match.id, displayName: match.displayName };
+          log.info(
+            { filename: file.name, filenameUsername: username, dbUsername: match.displayName },
+            'matched filename username via leading-char-stripped fallback'
+          );
+        }
+      }
       if (!dbUser) {
         log.warn({ filename: file.name, username, recordingId }, 'no Barkeep user matches Discord username');
         report.filesSkipped += 1;
