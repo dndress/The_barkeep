@@ -25,6 +25,8 @@ interface SeedUser {
   discordUsername: string;
   /** Real human name from the player roster doc */
   displayName: string;
+  /** True for music bots / soundboards. Cook skips their tracks. */
+  isBot?: boolean;
 }
 
 interface SeedCharacter {
@@ -62,7 +64,9 @@ const USERS: SeedUser[] = [
   { discordUserId: '394878699520000020', discordUsername: 'lucasguti20',             displayName: 'Lucas Gutierrez' },
   { discordUserId: '700033531946205255', discordUsername: 'cceballos',               displayName: 'Cristian Ceballos' },
   { discordUserId: '1020800023350489108', discordUsername: '_danielgallego',         displayName: 'Daniel Gallego' },
-  { discordUserId: '925758694799572992',  discordUsername: 'andreaarango118',        displayName: 'Andrea Arango' }
+  { discordUserId: '925758694799572992',  discordUsername: 'andreaarango118',        displayName: 'Andrea Arango' },
+  // Bots — cook skips creating AudioFile rows for them.
+  { discordUserId: '1145363441524166758', discordUsername: 'matchbox',               displayName: 'MatchBox (music bot)', isBot: true }
 ];
 
 const CAMPAIGNS: SeedCampaign[] = [
@@ -107,16 +111,18 @@ const CAMPAIGNS: SeedCampaign[] = [
 // ---------------------------------------------------------------------------
 
 async function seed(): Promise<void> {
-  // 1. Users — upsert by discordUserId. Refresh username, never displayName.
+  // 1. Users — upsert by discordUserId. Refresh username + isBot, never
+  // displayName (it's the real human / bot label, not auto-managed).
   const userIdByDiscord = new Map<string, string>();
   for (const u of USERS) {
     const row = await prisma.user.upsert({
       where: { discordUserId: u.discordUserId },
-      update: { discordUsername: u.discordUsername },
+      update: { discordUsername: u.discordUsername, isBot: u.isBot ?? false },
       create: {
         discordUserId: u.discordUserId,
         discordUsername: u.discordUsername,
-        displayName: u.displayName
+        displayName: u.displayName,
+        isBot: u.isBot ?? false
       }
     });
     userIdByDiscord.set(u.discordUserId, row.id);

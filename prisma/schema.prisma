@@ -65,6 +65,10 @@ model User {
   discordUsername   String   @map("discord_username")
   // Real human name from the seed file. NEVER overwritten by webhook data.
   displayName       String   @map("display_name")
+  // True when this "user" is actually a Discord bot in the voice channel
+  // (music bot, soundboard, etc.). Cook skips AudioFile creation for bots —
+  // we never want to transcribe music or sound effects.
+  isBot             Boolean  @default(false) @map("is_bot")
   createdAt         DateTime @default(now()) @map("created_at")
 
   characters     Character[]

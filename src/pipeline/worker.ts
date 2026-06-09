@@ -258,13 +258,20 @@ async function processOneChapter(config: WorkerConfig, log: FastifyBaseLogger): 
     const discordIds = users
       .map((u) => u.discordUserId)
       .filter((v): v is string => Boolean(v));
-    const dbUsers: Array<{ id: string; discordUserId: string }> = discordIds.length
-      ? await prisma.user.findMany({
-          where: { discordUserId: { in: discordIds } },
-          select: { id: true, discordUserId: true }
-        })
-      : [];
+    const dbUsers: Array<{ id: string; discordUserId: string; isBot: boolean }> =
+      discordIds.length
+        ? await prisma.user.findMany({
+            where: { discordUserId: { in: discordIds } },
+            select: { id: true, discordUserId: true, isBot: true }
+          })
+        : [];
     const internalIdByDiscord = new Map(dbUsers.map((u) => [u.discordUserId, u.id]));
+    // Discord IDs that belong to known bots — cook skips those tracks
+    // entirely, otherwise the pipeline would wait forever on a transcript
+    // that will never arrive.
+    const botDiscordIds = new Set(
+      dbUsers.filter((u) => u.isBot).map((u) => u.discordUserId)
+    );
 
     let cookFiles: Array<{ trackIndex: number; absolutePath: string; fileSizeBytes: number }> = [];
     if (useGemini) {
@@ -300,8 +307,20 @@ async function processOneChapter(config: WorkerConfig, log: FastifyBaseLogger): 
         }));
 
     let unknownUserCount = 0;
+    let botSkipCount = 0;
     for (const file of trackEntries) {
       const u = userByTrack.get(file.trackIndex);
+      // Skip bot tracks entirely. We don't want to transcribe music or
+      // soundboards, and creating an AudioFile row would block the session
+      // from advancing because no transcript will ever arrive.
+      if (u?.discordUserId && botDiscordIds.has(u.discordUserId)) {
+        botSkipCount += 1;
+        log.info(
+          { chapterId: chapter.id, trackIndex: file.trackIndex, discordUserId: u.discordUserId },
+          'skipping bot track (no AudioFile)'
+        );
+        continue;
+      }
       const userId = u?.discordUserId ? internalIdByDiscord.get(u.discordUserId) : undefined;
       if (!userId) unknownUserCount += 1;
       await prisma.audioFile.upsert({
@@ -326,8 +345,14 @@ async function processOneChapter(config: WorkerConfig, log: FastifyBaseLogger): 
 
     if (unknownUserCount > 0) {
       log.warn(
-        { chapterId: chapter.id, unknownUserCount, totalTracks: trackEntries.length },
+        { chapterId: chapter.id, unknownUserCount, totalTracks: trackEntries.length, botSkipCount },
         'some tracks did not map to a known User — seed may be missing Discord IDs'
+      );
+    }
+    if (botSkipCount > 0) {
+      log.info(
+        { chapterId: chapter.id, botSkipCount, totalTracks: trackEntries.length },
+        'cook skipped bot tracks'
       );
     }
 
