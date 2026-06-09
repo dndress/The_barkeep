@@ -24,7 +24,7 @@ import path from 'node:path';
 import type { FastifyBaseLogger } from 'fastify';
 
 import { getPrisma } from '../db.js';
-import { notifyAdmin, notifyAdminNeedsReview } from '../discord/notifier.js';
+import { notifyAdmin, notifyAdminNeedsReview, notifyAdminPlayerReview } from '../discord/notifier.js';
 import { cookChapter, recordingBasename } from './cook.js';
 import { pollDriveOnce } from './driveIngest.js';
 import {
@@ -699,6 +699,9 @@ async function processOneSummarize(
   log: FastifyBaseLogger
 ): Promise<boolean> {
   const prisma = getPrisma();
+  // Also pick up sessions that were paused at NEEDS_PLAYER_REVIEW once
+  // the admin resolves all the player buttons — when the last button click
+  // sets status back to SUMMARIZING, the next tick lands here.
   const session = await prisma.session.findFirst({
     where: {
       status: 'SUMMARIZING',
@@ -843,6 +846,63 @@ async function processOneSummarize(
         }
       });
     });
+
+    // 3.5. Player-character review: if any PLAYER session_player row ended
+    // up with character_id=null, pause at NEEDS_PLAYER_REVIEW and DM the
+    // admin one button-message per unresolved player. The admin's clicks
+    // (handled by playerReviewButtons.ts) set status back to SUMMARIZING
+    // when the last row is resolved.
+    const unresolvedPlayers = await prisma.sessionPlayer.findMany({
+      where: { sessionId: session.id, role: 'PLAYER', characterId: null },
+      include: { user: { select: { id: true, discordUserId: true, displayName: true } } }
+    });
+    if (unresolvedPlayers.length > 0) {
+      log.info(
+        { sessionId: session.id, count: unresolvedPlayers.length },
+        'pausing at needs_player_review — sending admin DMs'
+      );
+      // Build the candidate-character list per player: characters in the
+      // campaign belonging to the user, minus characters already claimed
+      // by other resolved session_players this session.
+      const allCampaignCharacters = await prisma.character.findMany({
+        where: { campaignId: reconciliation.campaignId, active: true },
+        select: { id: true, name: true, userId: true }
+      });
+      const resolvedSp = await prisma.sessionPlayer.findMany({
+        where: { sessionId: session.id, characterId: { not: null } },
+        select: { characterId: true }
+      });
+      const claimed = new Set(resolvedSp.map((r) => r.characterId));
+      const campaign = await prisma.campaign.findUnique({
+        where: { id: reconciliation.campaignId },
+        select: { name: true }
+      });
+
+      for (const usp of unresolvedPlayers) {
+        // First-pass options: user's own characters that aren't already claimed
+        let options = allCampaignCharacters.filter(
+          (c) => c.userId === usp.userId && !claimed.has(c.id)
+        );
+        // If user has none in this campaign, broaden to all unclaimed characters
+        // (covers the "playing someone else's character this session" edge case).
+        if (options.length === 0) {
+          options = allCampaignCharacters.filter((c) => !claimed.has(c.id));
+        }
+        await notifyAdminPlayerReview(log, {
+          sessionId: session.id,
+          campaignName: campaign?.name ?? '(unknown campaign)',
+          playerDisplayName: usp.user.displayName,
+          playerDiscordUserId: usp.user.discordUserId,
+          userId: usp.user.id,
+          characterChoices: options.map((c) => ({ id: c.id, name: c.name }))
+        });
+      }
+      await prisma.session.update({
+        where: { id: session.id },
+        data: { status: 'NEEDS_PLAYER_REVIEW' }
+      });
+      return true;
+    }
 
     // 4. Summarize. One big call — wrap with 429-retry so a free-tier
     // burst right after intro extraction doesn't fail the whole session.

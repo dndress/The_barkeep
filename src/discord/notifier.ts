@@ -77,6 +77,11 @@ export interface NeedsReviewCampaignChoice {
   name: string;
 }
 
+export interface PlayerReviewCharacterChoice {
+  id: string;
+  name: string;
+}
+
 /**
  * Send the admin a NEEDS_REVIEW DM with one button per campaign + Skip.
  * Discord caps a single row at 5 buttons — if there are more campaigns we
@@ -136,5 +141,73 @@ export async function notifyAdminNeedsReview(
     log.info({ sessionId, campaignChoices: campaigns.length }, 'needs-review DM sent with buttons');
   } catch (err) {
     log.error({ err, sessionId }, 'failed to send NEEDS_REVIEW DM');
+  }
+}
+
+/**
+ * Send a DM asking the admin to pick which character a specific player
+ * was playing in a session. Buttons are scoped to that user's possible
+ * characters in the campaign, minus any already claimed in this session.
+ * Plus a "Skip" button to leave the player as Unknown.
+ */
+export async function notifyAdminPlayerReview(
+  log: FastifyBaseLogger,
+  args: {
+    sessionId: string;
+    campaignName: string;
+    playerDisplayName: string;
+    playerDiscordUserId: string;
+    userId: string;        // internal Users.id of the player
+    characterChoices: PlayerReviewCharacterChoice[];
+  }
+): Promise<void> {
+  if (!isDiscordReady()) {
+    log.warn({ sessionId: args.sessionId }, 'notifyAdminPlayerReview: discord not ready');
+    return;
+  }
+  try {
+    const client = getDiscordClient();
+    const admin = await fetchAdmin(client);
+    if (!admin) {
+      log.warn('could not fetch admin user — skipping player-review DM');
+      return;
+    }
+
+    const userPrefix = args.userId.slice(0, 8);
+    const buttons: ButtonBuilder[] = args.characterChoices.slice(0, 24).map((c) =>
+      new ButtonBuilder()
+        // pp:assign:<sessionId>:<userPrefix>:<characterPrefix>
+        // Lengths: 10 + 36 + 1 + 8 + 1 + 8 = 64. Well under 100.
+        .setCustomId(`pp:assign:${args.sessionId}:${userPrefix}:${c.id.slice(0, 8)}`)
+        .setLabel(c.name.slice(0, 80))
+        .setStyle(ButtonStyle.Primary)
+    );
+    buttons.push(
+      new ButtonBuilder()
+        .setCustomId(`pp:skip:${args.sessionId}:${userPrefix}`)
+        .setLabel('Skip — use real name')
+        .setStyle(ButtonStyle.Secondary)
+    );
+
+    const rows: ActionRowBuilder<ButtonBuilder>[] = [];
+    for (let i = 0; i < buttons.length; i += 5) {
+      rows.push(new ActionRowBuilder<ButtonBuilder>().addComponents(buttons.slice(i, i + 5)));
+      if (rows.length === 5) break;
+    }
+
+    const content = [
+      `🛠️ **Player needs review** in **${args.campaignName}**`,
+      ``,
+      `Couldn't auto-detect which character **${args.playerDisplayName}** (<@${args.playerDiscordUserId}>) was playing this session.`,
+      `Pick their character, or Skip to leave them as "${args.playerDisplayName}" in the recap.`
+    ].join('\n');
+
+    await admin.send({ content, components: rows });
+    log.info(
+      { sessionId: args.sessionId, playerDisplayName: args.playerDisplayName, choices: args.characterChoices.length },
+      'player-review DM sent'
+    );
+  } catch (err) {
+    log.error({ err, sessionId: args.sessionId }, 'failed to send player-review DM');
   }
 }

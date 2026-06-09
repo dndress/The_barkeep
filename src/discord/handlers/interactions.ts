@@ -15,6 +15,7 @@ import { makeExecute as makeCheckDriveExecute, data as checkDriveData } from '..
 import * as useGeminiFor from '../commands/useGeminiFor.js';
 import { makeExecute as makeAskExecute, data as askData } from '../commands/ask.js';
 import { handleNeedsReviewButton, isNeedsReviewButton } from './needsReviewButtons.js';
+import { handlePlayerReviewButton, isPlayerReviewButton } from './playerReviewButtons.js';
 
 interface CommandModule {
   execute: (interaction: import('discord.js').ChatInputCommandInteraction) => Promise<void>;
@@ -75,6 +76,8 @@ export function wireInteractionHandler(
       if (interaction.isButton()) {
         if (isNeedsReviewButton(interaction.customId)) {
           await handleNeedsReviewButton(interaction);
+        } else if (isPlayerReviewButton(interaction.customId)) {
+          await handlePlayerReviewButton(interaction);
         }
         return;
       }

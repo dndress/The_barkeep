@@ -109,14 +109,17 @@ model Character {
 // ============================================================================
 
 enum SessionStatus {
-  RECEIVING    @map("receiving")
-  COOKING      @map("cooking")
-  TRANSCRIBING @map("transcribing")
-  SUMMARIZING  @map("summarizing")
-  READY        @map("ready")
-  POSTED       @map("posted")
-  NEEDS_REVIEW @map("needs_review")
-  FAILED       @map("failed")
+  RECEIVING            @map("receiving")
+  COOKING              @map("cooking")
+  TRANSCRIBING         @map("transcribing")
+  SUMMARIZING          @map("summarizing")
+  // Campaign/DM ok, but one or more players' characters couldn't be
+  // auto-resolved. Worker pauses until the admin clicks the DM buttons.
+  NEEDS_PLAYER_REVIEW  @map("needs_player_review")
+  READY                @map("ready")
+  POSTED               @map("posted")
+  NEEDS_REVIEW         @map("needs_review")
+  FAILED               @map("failed")
 }
 
 enum CampaignDetectionMethod {
