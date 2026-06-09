@@ -58,13 +58,13 @@ export async function runSequentialThrottled<T, R>(
 }
 
 /**
- * Wrap a Gemini call to catch 429s and respect the `retry in Ns` hint the
- * API embeds in the error message. Does NOT count against the caller's
- * own retry budget — so a transient rate-limit hit during summarization
- * doesn't burn a session's summarize_attempts.
+ * Wrap a Gemini call to catch TRANSIENT failures and retry without
+ * counting against the caller's own retry budget. Covers:
+ *   - 429 RESOURCE_EXHAUSTED (rate limit / quota) → respects `retry in Ns`
+ *   - 503 UNAVAILABLE (model overloaded) → exponential backoff
  *
- * Caps total wait at 120s to avoid pathological blocking. If still 429
- * after maxRetries, the original error is re-thrown.
+ * Caps individual waits at 120s. If the error persists after maxRetries,
+ * the original error is re-thrown so the caller can mark its own state.
  */
 export async function withGeminiRateLimitRetry<T>(
   fn: () => Promise<T>,
@@ -77,14 +77,21 @@ export async function withGeminiRateLimitRetry<T>(
     } catch (err) {
       lastErr = err as Error;
       const msg = String(lastErr.message ?? '');
-      // Look for either Gemini's "retry in Ns" or a plain 429 indication.
       const retryAfterMatch = msg.match(/retry in (\d+(?:\.\d+)?)\s*s/i);
       const is429 = retryAfterMatch || /\b429\b|RESOURCE_EXHAUSTED|quota/i.test(msg);
-      if (!is429 || attempt >= maxRetries) throw lastErr;
-      const wait = retryAfterMatch
-        ? Math.min(parseFloat(retryAfterMatch[1]!), 120)
-        : 30; // fall back to 30s if no hint
-      await new Promise((r) => setTimeout(r, Math.ceil(wait * 1000)));
+      const is503 = /\b503\b|UNAVAILABLE|experiencing high demand|model is overloaded/i.test(msg);
+      if ((!is429 && !is503) || attempt >= maxRetries) throw lastErr;
+
+      let waitSec: number;
+      if (retryAfterMatch) {
+        waitSec = Math.min(parseFloat(retryAfterMatch[1]!), 120);
+      } else if (is503) {
+        // Exponential backoff for overloaded model: 10s, 30s, 60s
+        waitSec = Math.min(10 * Math.pow(3, attempt), 60);
+      } else {
+        waitSec = 30;
+      }
+      await new Promise((r) => setTimeout(r, Math.ceil(waitSec * 1000)));
     }
   }
   throw lastErr ?? new Error('withGeminiRateLimitRetry: unreachable');
