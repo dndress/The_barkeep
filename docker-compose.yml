@@ -72,6 +72,8 @@ services:
       INTRO_EXTRACTION_TIMEOUT_MS: ${INTRO_EXTRACTION_TIMEOUT_MS:-120000}
       SHORT_SUMMARY_WORD_TARGET: ${SHORT_SUMMARY_WORD_TARGET:-350}
       KEY_EVENTS_TARGET: ${KEY_EVENTS_TARGET:-8}
+      # Gemini per-minute call budget (5 = free tier, 2000 = paid tier)
+      GEMINI_RPM_LIMIT: ${GEMINI_RPM_LIMIT:-5}
       # Stage 5 — Discord admin notifier (REST-only, no gateway yet)
       BARKEEP_DISCORD_BOT_TOKEN: ${BARKEEP_DISCORD_BOT_TOKEN:-}
       ADMIN_DISCORD_USER_ID: ${ADMIN_DISCORD_USER_ID:-}

@@ -34,6 +34,7 @@ import {
 } from './driveSetup.js';
 import { embedSession } from './embedSession.js';
 import { extractIntroFromTranscript } from './extractIntros.js';
+import { runSequentialThrottled, withGeminiRateLimitRetry } from './gemini.js';
 import { reconcileSession, type PerTrackExtraction } from './reconcile.js';
 import { postOneScheduledRecap } from './recapPoster.js';
 import { summarizeSession } from './summarize.js';
@@ -757,15 +758,21 @@ async function processOneSummarize(
   }
 
   try {
-    // 1. Extract intros in parallel.
+    // 1. Extract intros — sequentially with a free-tier-safe spacer so we
+    // don't 429. Each call is also wrapped with a 429-retry that respects
+    // the API's "retry in Ns" hint without counting against this session's
+    // own summarize_attempts budget.
     log.info({ sessionId: session.id, trackCount: tracks.length }, 'extracting intros');
-    const extractions: PerTrackExtraction[] = await Promise.all(
-      tracks.map(async (t) => {
-        const result = await extractIntroFromTranscript({
-          transcript: t.transcript,
-          model: config.summarizeModel,
-          timeoutMs: config.introExtractionTimeoutMs
-        });
+    const extractions: PerTrackExtraction[] = await runSequentialThrottled(
+      tracks,
+      async (t) => {
+        const result = await withGeminiRateLimitRetry(() =>
+          extractIntroFromTranscript({
+            transcript: t.transcript,
+            model: config.summarizeModel,
+            timeoutMs: config.introExtractionTimeoutMs
+          })
+        );
         return {
           audioFileId: t.audioFileId,
           userId: t.userId,
@@ -775,7 +782,7 @@ async function processOneSummarize(
           campaignName: result.campaignName,
           confidence: result.confidence
         };
-      })
+      }
     );
 
     // 2. Reconcile.
@@ -837,17 +844,20 @@ async function processOneSummarize(
       });
     });
 
-    // 4. Summarize.
+    // 4. Summarize. One big call — wrap with 429-retry so a free-tier
+    // burst right after intro extraction doesn't fail the whole session.
     log.info({ sessionId: session.id }, 'building chronological transcript and summarizing');
-    const summary = await summarizeSession({
-      prisma,
-      sessionId: session.id,
-      model: config.summarizeModel,
-      languageHint: config.summarizeLanguageHint,
-      shortWordTarget: config.shortSummaryWordTarget,
-      keyEventsTarget: config.keyEventsTarget,
-      timeoutMs: config.summarizeTimeoutMs
-    });
+    const summary = await withGeminiRateLimitRetry(() =>
+      summarizeSession({
+        prisma,
+        sessionId: session.id,
+        model: config.summarizeModel,
+        languageHint: config.summarizeLanguageHint,
+        shortWordTarget: config.shortSummaryWordTarget,
+        keyEventsTarget: config.keyEventsTarget,
+        timeoutMs: config.summarizeTimeoutMs
+      })
+    );
 
     // 5. Persist Summary + CharacterMemory.
     const sessionPlayersWithChars = await prisma.sessionPlayer.findMany({
