@@ -91,7 +91,7 @@ services:
       EMBED_MODEL: ${EMBED_MODEL:-text-embedding-004}
       EMBED_MAX_ATTEMPTS: ${EMBED_MAX_ATTEMPTS:-3}
       EMBED_TIMEOUT_MS: ${EMBED_TIMEOUT_MS:-600000}
-      ASK_MODEL: ${ASK_MODEL:-gemini-2.5-pro}
+      ASK_MODEL: ${ASK_MODEL:-gemini-2.5-flash}
       ASK_TOP_K: ${ASK_TOP_K:-10}
       ASK_TIMEOUT_MS: ${ASK_TIMEOUT_MS:-60000}
     ports:

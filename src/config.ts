@@ -64,7 +64,7 @@ const Env = z.object({
   EMBED_MODEL: z.string().default('gemini-embedding-001'),
   EMBED_MAX_ATTEMPTS: z.coerce.number().int().positive().default(3),
   EMBED_TIMEOUT_MS: z.coerce.number().int().positive().default(10 * 60 * 1000),
-  ASK_MODEL: z.string().default('gemini-2.5-pro'),
+  ASK_MODEL: z.string().default('gemini-2.5-flash'),
   ASK_TOP_K: z.coerce.number().int().positive().default(10),
   ASK_TIMEOUT_MS: z.coerce.number().int().positive().default(60 * 1000),
 
