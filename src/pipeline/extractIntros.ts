@@ -77,6 +77,10 @@ export async function extractIntroFromTranscript(
       ],
       config: {
         temperature: 0,
+        // Mechanical extraction — thinking adds minutes of latency on large
+        // transcripts (observed: first call exceeding the 120s timeout) for
+        // zero quality gain. Disable it.
+        thinkingConfig: { thinkingBudget: 0 },
         responseMimeType: 'application/json',
         responseSchema: {
           type: Type.OBJECT,
