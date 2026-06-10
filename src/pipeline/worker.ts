@@ -788,12 +788,17 @@ async function processOneSummarize(
       }
     );
 
-    // 2. Reconcile.
+    // 2. Reconcile. If the admin already tagged this session (needs-review
+    // button or /tag-session), honor that — otherwise reconciliation would
+    // re-detect from intros, fail again, and re-ask the same question forever.
+    const manuallyTagged = session.detectionMethod === 'MANUAL_TAG';
     const reconciliation = await reconcileSession({
       prisma,
       sessionId: session.id,
       discordGuildId: session.discordGuildId,
-      extractions
+      extractions,
+      knownCampaignId: manuallyTagged ? session.campaignId : null,
+      knownDmUserId: manuallyTagged ? session.dmUserId : null
     });
 
     if (!reconciliation.success) {
@@ -841,8 +846,12 @@ async function processOneSummarize(
         data: {
           campaignId: reconciliation.campaignId,
           dmUserId: reconciliation.dmUserId,
-          sessionNumber: nextNumber,
-          detectionMethod: 'VOICE_INTRO'
+          // Keep an existing sessionNumber on re-runs (e.g. after
+          // NEEDS_PLAYER_REVIEW) — the aggregate above includes this very
+          // session, so recomputing would bump it to its own number + 1.
+          sessionNumber: session.sessionNumber ?? nextNumber,
+          // Preserve MANUAL_TAG so re-runs keep honoring the admin's choice.
+          detectionMethod: manuallyTagged ? 'MANUAL_TAG' : 'VOICE_INTRO'
         }
       });
     });

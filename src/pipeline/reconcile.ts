@@ -75,10 +75,17 @@ export interface ReconcileOptions {
   /** Discord guild ID to scope campaigns. */
   discordGuildId: string;
   extractions: PerTrackExtraction[];
+  /**
+   * Pre-resolved campaign (e.g. admin used /tag-session or a needs-review
+   * button). When set, campaign detection from intros is skipped entirely.
+   */
+  knownCampaignId?: string | null;
+  /** Pre-resolved DM user id (admin-supplied). Skips DM detection when set. */
+  knownDmUserId?: string | null;
 }
 
 export async function reconcileSession(opts: ReconcileOptions): Promise<ReconciliationResult> {
-  const { prisma, sessionId, discordGuildId, extractions } = opts;
+  const { prisma, sessionId, discordGuildId, extractions, knownCampaignId, knownDmUserId } = opts;
 
   // 1. Campaign resolution. Collect all proposed campaign names from
   // tracks where isDm=true (most reliable), then fall back to all tracks.
@@ -97,8 +104,8 @@ export async function reconcileSession(opts: ReconcileOptions): Promise<Reconcil
     select: { id: true, name: true }
   });
 
-  let resolvedCampaignId: string | null = null;
-  if (proposed.length > 0) {
+  let resolvedCampaignId: string | null = knownCampaignId ?? null;
+  if (!resolvedCampaignId && proposed.length > 0) {
     const matches = allCampaigns.filter((c) => proposed.some((p) => fuzzyMatches(c.name, p)));
     const unique = Array.from(new Set(matches.map((m) => m.id)));
     if (unique.length === 1) {
@@ -126,9 +133,12 @@ export async function reconcileSession(opts: ReconcileOptions): Promise<Reconcil
   }
 
   // 2. DM resolution. Exactly one isDm=true track is the happy path.
+  // A knownDmUserId (admin-supplied via /tag-session) short-circuits detection.
   const dmCandidates = extractions.filter((e) => e.isDm && e.userId);
-  let dmUserId: string | null = null;
-  if (dmCandidates.length === 1) {
+  let dmUserId: string | null = knownDmUserId ?? null;
+  if (dmUserId) {
+    // already resolved
+  } else if (dmCandidates.length === 1) {
     dmUserId = dmCandidates[0]!.userId!;
   } else if (dmCandidates.length > 1) {
     // Prefer the candidate with the highest confidence
