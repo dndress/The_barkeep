@@ -1,4 +1,4 @@
-// Orchestrator: take a question + context → return the Barkeep's reply.
+// Orchestrator: take a question + context → return Rikk's reply.
 //
 // Used by the /ask slash command. Steps:
 //   1. Embed the question.
@@ -86,7 +86,7 @@ export async function ask(opts: AskOptions): Promise<AskResult | AskFailure> {
     return {
       ok: false,
       reason: 'embed_failed',
-      userFacing: 'The Barkeep seems distracted today; try again in a moment.'
+      userFacing: 'Rikk is occupied with another matter at the moment. Try again shortly.'
     };
   }
 
@@ -101,7 +101,7 @@ export async function ask(opts: AskOptions): Promise<AskResult | AskFailure> {
       ok: false,
       reason: 'no_chunks',
       userFacing:
-        "I haven't heard any tales of this party yet, traveler. Come back after the bards have spoken."
+        "The chant has carried me nothing yet about this party, cutter. Return once the accounts have arrived."
     };
   }
 
@@ -116,7 +116,7 @@ export async function ask(opts: AskOptions): Promise<AskResult | AskFailure> {
       characterName: askerCharacter?.name ?? null,
       race: askerCharacter?.race ?? null,
       classOrRole: askerCharacter?.classOrRole ?? null,
-      displayName: user?.displayName ?? 'unknown traveler'
+      displayName: user?.displayName ?? 'unknown cutter'
     },
     retrieved
   });
@@ -148,7 +148,7 @@ export async function ask(opts: AskOptions): Promise<AskResult | AskFailure> {
     return {
       ok: false,
       reason: 'generate_failed',
-      userFacing: 'The Barkeep seems lost in thought today. Ask again in a moment.'
+      userFacing: "Rikk's thoughts are elsewhere just now. Ask again shortly."
     };
   }
 

@@ -78,7 +78,7 @@ export async function execute(interaction: ChatInputCommandInteraction): Promise
     const dmRow = await prisma.user.findUnique({ where: { discordUserId: dmUser.id } });
     if (!dmRow) {
       await interaction.reply({
-        content: `That user (<@${dmUser.id}>) isn't seeded in the Barkeep users table.`,
+        content: `That user (<@${dmUser.id}>) isn't seeded in the bot's users table.`,
         flags: MessageFlags.Ephemeral
       });
       return;

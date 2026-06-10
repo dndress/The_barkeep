@@ -1,4 +1,4 @@
-// /ask — the Barkeep answers in-character.
+// /ask — Rikk answers in-character.
 //
 // Channel must map to a campaign. Asker's character is resolved via their
 // most recent SessionPlayer in that campaign. Reply is public (everyone
@@ -16,9 +16,9 @@ import { ask } from '../../rag/ask.js';
 
 export const data = new SlashCommandBuilder()
   .setName('ask')
-  .setDescription('Ask the Barkeep about past sessions of this campaign')
+  .setDescription('Ask Rikk about past sessions of this campaign')
   .addStringOption((o) =>
-    o.setName('question').setDescription('What would you ask the Barkeep?').setRequired(true)
+    o.setName('question').setDescription('What would you ask Rikk?').setRequired(true)
   );
 
 export interface AskCommandDeps {
@@ -42,7 +42,7 @@ export function makeExecute(deps: AskCommandDeps) {
     const question = interaction.options.getString('question', true).trim();
     if (!question) {
       await interaction.reply({
-        content: 'You need to ask something, traveler.',
+        content: 'You need to ask something, cutter.',
         flags: MessageFlags.Ephemeral
       });
       return;
@@ -73,14 +73,14 @@ export function makeExecute(deps: AskCommandDeps) {
 
     const embed = new EmbedBuilder()
       .setColor(0xb87333)
-      .setAuthor({ name: `🍺 The Barkeep — ${result.campaignName}` })
+      .setAuthor({ name: `📜 Rikk — ${result.campaignName}` })
       .setDescription(result.reply.slice(0, 4000))
       .addFields({
         name: '​',
         value: `_❝ ${question.slice(0, 200)} ❞_`
       })
       .setFooter({
-        text: `Recalling tales from ${result.embeddedSessions} session${result.embeddedSessions === 1 ? '' : 's'} • ${result.retrievedCount} fragments`
+        text: `Drawn from the chant of ${result.embeddedSessions} session${result.embeddedSessions === 1 ? '' : 's'} • ${result.retrievedCount} accounts`
       });
 
     await interaction.editReply({ embeds: [embed] });

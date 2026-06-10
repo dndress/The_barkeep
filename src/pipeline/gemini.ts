@@ -13,7 +13,7 @@ export function getGemini(): GoogleGenAI {
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey) {
       throw new Error(
-        'GEMINI_API_KEY is not set. Stage 4 (transcription) requires the player\'s Gemini API key — add it to Dokploy env for the Barkeep service.'
+        'GEMINI_API_KEY is not set. Stage 4 (transcription) requires the player\'s Gemini API key — add it to Dokploy env for the bot service.'
       );
     }
     _client = new GoogleGenAI({ apiKey });
