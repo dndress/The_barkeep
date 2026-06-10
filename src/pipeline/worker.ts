@@ -33,8 +33,8 @@ import {
   writeSessionManifest
 } from './driveSetup.js';
 import { embedSession } from './embedSession.js';
-import { extractIntroFromTranscript } from './extractIntros.js';
-import { runSequentialThrottled, withGeminiRateLimitRetry } from './gemini.js';
+import { withGeminiRateLimitRetry } from './gemini.js';
+import { parseInfoFile, normalizeUsername } from './infoFile.js';
 import { reconcileSession, type PerTrackExtraction } from './reconcile.js';
 import { postOneScheduledRecap } from './recapPoster.js';
 import { summarizeSession } from './summarize.js';
@@ -761,37 +761,74 @@ async function processOneSummarize(
   }
 
   try {
-    // 1. Extract intros — sequentially with a free-tier-safe spacer so we
-    // don't 429. Each call is also wrapped with a 429-retry that respects
-    // the API's "retry in Ns" hint without counting against this session's
-    // own summarize_attempts budget.
-    log.info({ sessionId: session.id, trackCount: tracks.length }, 'extracting intros');
-    const extractions: PerTrackExtraction[] = await runSequentialThrottled(
-      tracks,
-      async (t) => {
-        const result = await withGeminiRateLimitRetry(() =>
-          extractIntroFromTranscript({
-            transcript: t.transcript,
-            model: config.summarizeModel,
-            timeoutMs: config.introExtractionTimeoutMs
-          })
-        );
-        return {
-          audioFileId: t.audioFileId,
-          userId: t.userId,
-          trackIndex: t.trackIndex,
-          isDm: result.isDm,
-          characterName: result.characterName,
-          campaignName: result.campaignName,
-          confidence: result.confidence
-        };
-      }
+    // 1. Stage 8 — deterministic identity from info.txt. No AI in this path:
+    // the roster note (campaign, DM, username→character pairs) is parsed
+    // from the ingested info.txt and matched against the seeded DB by the
+    // reconciler. If there's no usable roster AND no manual tag, the session
+    // goes straight to manual review.
+    const manuallyTagged = session.detectionMethod === 'MANUAL_TAG';
+    const roster = session.infoFileRaw ? parseInfoFile(session.infoFileRaw).roster : null;
+
+    if (!roster && !manuallyTagged) {
+      const reason = session.infoFileRaw
+        ? 'info.txt ingested but no parseable roster note found'
+        : 'no info.txt ingested for this session';
+      log.warn({ sessionId: session.id, reason }, 'no identity roster — flagging for review');
+      await prisma.session.update({
+        where: { id: session.id },
+        data: { status: 'NEEDS_REVIEW', summarizeError: reason }
+      });
+      const campaignChoices = await prisma.campaign.findMany({
+        where: { discordGuildId: session.discordGuildId, active: true },
+        select: { id: true, name: true }
+      });
+      await notifyAdminNeedsReview(log, session.id, reason, campaignChoices);
+      return true;
+    }
+
+    // Build per-track extractions from the roster (or empty ones when the
+    // session was manually tagged and no roster exists — campaign/DM then
+    // come from the tag, characters from last-used fallbacks or buttons).
+    const entryByUsername = new Map(
+      (roster?.entries ?? []).map((e) => [normalizeUsername(e.username), e])
+    );
+    const trackUserIds = tracks
+      .map((t) => t.userId)
+      .filter((v): v is string => Boolean(v));
+    const trackUsers: Array<{ id: string; discordUsername: string }> =
+      await prisma.user.findMany({
+        where: { id: { in: trackUserIds } },
+        select: { id: true, discordUsername: true }
+      });
+    const usernameByUserId = new Map(trackUsers.map((u) => [u.id, u.discordUsername]));
+
+    const extractions: PerTrackExtraction[] = tracks.map((t) => {
+      const uname = t.userId ? usernameByUserId.get(t.userId) : undefined;
+      const entry = uname ? entryByUsername.get(normalizeUsername(uname)) : undefined;
+      return {
+        audioFileId: t.audioFileId,
+        userId: t.userId,
+        trackIndex: t.trackIndex,
+        isDm: entry?.isDm ?? false,
+        characterName: entry?.characterName ?? null,
+        // Attach the campaign to every roster-matched track so reconcile
+        // can resolve it even if the DM's own track is missing.
+        campaignName: entry ? (roster?.campaignRaw ?? null) : null,
+        confidence: entry ? 1 : 0
+      };
+    });
+    log.info(
+      {
+        sessionId: session.id,
+        trackCount: tracks.length,
+        rosterMatched: extractions.filter((e) => e.confidence === 1).length,
+        fromInfoFile: Boolean(roster)
+      },
+      'identity extractions built from info file'
     );
 
     // 2. Reconcile. If the admin already tagged this session (needs-review
-    // button or /tag-session), honor that — otherwise reconciliation would
-    // re-detect from intros, fail again, and re-ask the same question forever.
-    const manuallyTagged = session.detectionMethod === 'MANUAL_TAG';
+    // button or /tag-session), honor that.
     const reconciliation = await reconcileSession({
       prisma,
       sessionId: session.id,
@@ -851,7 +888,7 @@ async function processOneSummarize(
           // session, so recomputing would bump it to its own number + 1.
           sessionNumber: session.sessionNumber ?? nextNumber,
           // Preserve MANUAL_TAG so re-runs keep honoring the admin's choice.
-          detectionMethod: manuallyTagged ? 'MANUAL_TAG' : 'VOICE_INTRO'
+          detectionMethod: manuallyTagged ? 'MANUAL_TAG' : 'INFO_FILE'
         }
       });
     });

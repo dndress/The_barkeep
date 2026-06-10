@@ -18,6 +18,7 @@ import { Type } from '@google/genai';
 import type { PrismaClient } from '@prisma/client';
 import { z } from 'zod';
 
+import { parseCombinedTranscript } from './combinedTranscript.js';
 import { getGemini } from './gemini.js';
 
 export interface SummarizeOptions {
@@ -152,7 +153,9 @@ export async function summarizeSession(opts: SummarizeOptions): Promise<Summariz
       },
       sessionPlayers: {
         include: { character: { select: { id: true, name: true } } }
-      }
+      },
+      // Stage 8 — preferred summarization input when present.
+      combinedTranscript: { select: { fullText: true } }
     }
   });
 
@@ -164,6 +167,21 @@ export async function summarizeSession(opts: SummarizeOptions): Promise<Summariz
       characterLabelByUser.set(sp.userId, 'DM');
     } else if (sp.character) {
       characterLabelByUser.set(sp.userId, sp.character.name);
+    }
+  }
+
+  // Stage 8 fast path: the external pipeline already produced one
+  // chronological transcript labeled by character name. Use it verbatim —
+  // no interleaving needed. The per-track interleave below remains the
+  // fallback (Gemini-transcription path, or combined file never arrived).
+  if (session.combinedTranscript?.fullText) {
+    const parsed = parseCombinedTranscript(session.combinedTranscript.fullText);
+    if (parsed.segments.length > 0) {
+      return await runSummaryModel({
+        opts,
+        interleavedTranscript: session.combinedTranscript.fullText,
+        characterNames: parsed.speakers
+      });
     }
   }
 
@@ -214,7 +232,24 @@ export async function summarizeSession(opts: SummarizeOptions): Promise<Summariz
     .join('\n');
 
   // 5. Build prompt + call Gemini.
-  const characterNames = Array.from(new Set(lines.map((l) => l.speaker)));
+  return await runSummaryModel({
+    opts,
+    interleavedTranscript,
+    characterNames: Array.from(new Set(lines.map((l) => l.speaker)))
+  });
+}
+
+/**
+ * Shared model invocation — takes a ready chronological transcript (either
+ * the Stage 8 combined file or the legacy per-track interleave) and runs
+ * the single summarization call.
+ */
+async function runSummaryModel(args: {
+  opts: SummarizeOptions;
+  interleavedTranscript: string;
+  characterNames: string[];
+}): Promise<SummarizeResult> {
+  const { opts, interleavedTranscript, characterNames } = args;
   const prompt = buildPrompt({
     languageHint: opts.languageHint,
     shortWordTarget: opts.shortWordTarget,

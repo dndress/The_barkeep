@@ -125,6 +125,8 @@ enum SessionStatus {
 enum CampaignDetectionMethod {
   VOICE_INTRO @map("voice_intro")
   MANUAL_TAG  @map("manual_tag")
+  // Stage 8 — deterministic roster from Craig's info.txt Notes block.
+  INFO_FILE   @map("info_file")
 }
 
 // Stage 6.5 — which transcription path a session uses.
@@ -195,6 +197,9 @@ model Session {
   driveManifestWrittenAt  DateTime? @map("drive_manifest_written_at")
   driveSetupAttempts      Int       @default(0) @map("drive_setup_attempts")
   driveSetupError         String?   @map("drive_setup_error")
+  // Stage 8 — raw text of the info.txt ingested from the Drive subfolder.
+  // Parsed at summarize time; kept raw for debugging / re-parse after fixes.
+  infoFileRaw         String?                  @map("info_file_raw")
   createdAt           DateTime                 @default(now()) @map("created_at")
   updatedAt           DateTime                 @updatedAt @map("updated_at")
 
@@ -206,9 +211,28 @@ model Session {
   summary        Summary?
   memories       CharacterMemory[]
   artPieces      ArtPiece[]
+  combinedTranscript CombinedTranscript?
 
   @@unique([campaignId, sessionNumber])
   @@map("sessions")
+}
+
+// Stage 8 — the single chronological transcript produced by the external
+// pipeline (combined_<recording_id>.txt in the Drive subfolder). Lines are
+// "[HH:MM:SS.mmm] CharacterName: text". Preferred summarization input;
+// per-track transcripts remain the embedding source.
+model CombinedTranscript {
+  id             String   @id @default(uuid())
+  sessionId      String   @unique @map("session_id")
+  fullText       String   @map("full_text")
+  // Parsed lines: [{ startSec, speaker, text }]
+  segments       Json
+  sourceFileName String?  @map("source_file_name")
+  ingestedAt     DateTime @default(now()) @map("ingested_at")
+
+  session Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@map("combined_transcripts")
 }
 
 model Chapter {

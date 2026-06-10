@@ -19,6 +19,8 @@
 import type { FastifyBaseLogger } from 'fastify';
 
 import { getPrisma } from '../db.js';
+import { parseCombinedTranscript } from './combinedTranscript.js';
+import { parseInfoFile } from './infoFile.js';
 import { parseWhisperJsonString, extractDiscordUsernameFromCookFilename } from './whisperJson.js';
 
 const DRIVE_API = 'https://www.googleapis.com/drive/v3';
@@ -79,6 +81,10 @@ interface IngestReport {
   sessionsTouched: number;
   transcriptsWritten: number;
   filesSkipped: number;
+  /** Stage 8 — info.txt files stored this poll. */
+  infoFilesIngested: number;
+  /** Stage 8 — combined transcripts stored this poll. */
+  combinedIngested: number;
   errors: string[];
 }
 
@@ -100,6 +106,8 @@ export async function pollDriveOnce(
     sessionsTouched: 0,
     transcriptsWritten: 0,
     filesSkipped: 0,
+    infoFilesIngested: 0,
+    combinedIngested: 0,
     errors: []
   };
 
@@ -127,7 +135,8 @@ export async function pollDriveOnce(
               select: { id: true, userId: true, trackIndex: true, transcript: true }
             }
           }
-        }
+        },
+        combinedTranscript: { select: { id: true } }
       }
     });
     if (!session) {
@@ -156,10 +165,83 @@ export async function pollDriveOnce(
     }
 
     let touchedThisSession = false;
+    const combinedName = `combined_${recordingId.toLowerCase()}.txt`;
+
+    // --- Stage 8: info.txt — deterministic identity roster ---------------
+    // Stored raw on the session; parsed again at summarize time so a code
+    // fix to the parser can be applied by just resetting the session.
+    const infoDrive = filesInSession.find(
+      (f) => f.mimeType !== FOLDER_MIME && f.name.toLowerCase() === 'info.txt'
+    );
+    if (infoDrive && !session.infoFileRaw) {
+      try {
+        const body = await driveDownloadFile(infoDrive.id, apiKey);
+        const parsed = parseInfoFile(body);
+        await prisma.session.update({
+          where: { id: session.id },
+          data: { infoFileRaw: body }
+        });
+        report.infoFilesIngested += 1;
+        touchedThisSession = true;
+        log.info(
+          {
+            recordingId,
+            rosterFound: Boolean(parsed.roster),
+            rosterEntries: parsed.roster?.entries.length ?? 0,
+            campaignRaw: parsed.roster?.campaignRaw ?? null
+          },
+          'info.txt ingested from drive'
+        );
+        if (!parsed.roster) {
+          log.warn(
+            { recordingId },
+            'info.txt has no parseable roster note — session will fall back to manual review'
+          );
+        }
+      } catch (err) {
+        report.errors.push(`info ${recordingId}: ${(err as Error).message}`);
+      }
+    }
+
+    // --- Stage 8: combined chronological transcript -----------------------
+    if (!session.combinedTranscript) {
+      const combinedDrive = filesInSession.find(
+        (f) => f.mimeType !== FOLDER_MIME && f.name.toLowerCase() === combinedName
+      );
+      if (combinedDrive) {
+        try {
+          const body = await driveDownloadFile(combinedDrive.id, apiKey);
+          const parsed = parseCombinedTranscript(body);
+          if (parsed.segments.length === 0) {
+            report.errors.push(`combined ${recordingId}: no parseable [HH:MM:SS] lines`);
+          } else {
+            await prisma.combinedTranscript.create({
+              data: {
+                sessionId: session.id,
+                fullText: body,
+                segments: parsed.segments as unknown as object,
+                sourceFileName: combinedDrive.name
+              }
+            });
+            report.combinedIngested += 1;
+            touchedThisSession = true;
+            log.info(
+              { recordingId, segments: parsed.segments.length, speakers: parsed.speakers },
+              'combined transcript ingested from drive'
+            );
+          }
+        } catch (err) {
+          report.errors.push(`combined ${recordingId}: ${(err as Error).message}`);
+        }
+      }
+    }
+
     for (const file of filesInSession) {
       if (file.mimeType === FOLDER_MIME) continue;
       if (!file.name.toLowerCase().endsWith('.json')) {
-        report.filesSkipped += 1;
+        const lower = file.name.toLowerCase();
+        // Stage 8 artifacts are handled above — don't count them as skips.
+        if (lower !== 'info.txt' && lower !== combinedName) report.filesSkipped += 1;
         continue;
       }
 

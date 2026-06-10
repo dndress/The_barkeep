@@ -69,6 +69,37 @@ function fuzzyMatches(a: string, b: string): boolean {
   return shared >= 2 || (ta.size > 0 && shared === ta.size) || (tb.size > 0 && shared === tb.size);
 }
 
+/** Plain dynamic-programming Levenshtein distance. */
+function levenshtein(a: string, b: string): number {
+  const m = a.length;
+  const n = b.length;
+  if (m === 0) return n;
+  if (n === 0) return m;
+  let prev = Array.from({ length: n + 1 }, (_, j) => j);
+  for (let i = 1; i <= m; i++) {
+    const curr = [i, ...new Array<number>(n)];
+    for (let j = 1; j <= n; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      curr[j] = Math.min(curr[j - 1]! + 1, prev[j]! + 1, prev[j - 1]! + cost);
+    }
+    prev = curr;
+  }
+  return prev[n]!;
+}
+
+/**
+ * Typo-tolerant name match: normalized edit distance ≤ 1 for short names,
+ * ≤ 2 for names of 6+ chars. Catches roster-note misspellings like
+ * "RedFlack" → "Redfalck" or "Yago" → "Jago" that token fuzzy misses.
+ */
+function typoMatches(a: string, b: string): boolean {
+  const na = normalize(a);
+  const nb = normalize(b);
+  if (!na || !nb) return false;
+  const maxDist = Math.min(na.length, nb.length) >= 6 ? 2 : 1;
+  return levenshtein(na, nb) <= maxDist;
+}
+
 export interface ReconcileOptions {
   prisma: PrismaClient;
   sessionId: string;
@@ -214,7 +245,10 @@ export async function reconcileSession(opts: ReconcileOptions): Promise<Reconcil
     let detectedFromVoice = false;
 
     if (e.characterName) {
-      const match = candidates.find((c) => fuzzyMatches(c.name, e.characterName as string));
+      const wanted = e.characterName;
+      const match =
+        candidates.find((c) => fuzzyMatches(c.name, wanted)) ??
+        candidates.find((c) => typoMatches(c.name, wanted));
       if (match) {
         characterId = match.id;
         detectedFromVoice = true;

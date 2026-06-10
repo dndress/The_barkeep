@@ -61,6 +61,8 @@ export function makeExecute(deps: CheckDriveDeps) {
         `• Subfolders inspected: **${report.subfoldersInspected}**`,
         `• Sessions touched: **${report.sessionsTouched}**`,
         `• Transcripts written: **${report.transcriptsWritten}**`,
+        `• Info files ingested: **${report.infoFilesIngested}**`,
+        `• Combined transcripts ingested: **${report.combinedIngested}**`,
         `• Files skipped: **${report.filesSkipped}**${errors}`
       ].join('\n')
     });
