@@ -61,7 +61,7 @@ const Env = z.object({
   GOOGLE_SERVICE_ACCOUNT_JSON: z.string().min(1).optional(),
 
   // Stage 7 — embeddings + /ask
-  EMBED_MODEL: z.string().default('text-embedding-004'),
+  EMBED_MODEL: z.string().default('gemini-embedding-001'),
   EMBED_MAX_ATTEMPTS: z.coerce.number().int().positive().default(3),
   EMBED_TIMEOUT_MS: z.coerce.number().int().positive().default(10 * 60 * 1000),
   ASK_MODEL: z.string().default('gemini-2.5-pro'),
