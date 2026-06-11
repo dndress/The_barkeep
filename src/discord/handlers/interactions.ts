@@ -16,6 +16,7 @@ import * as useGeminiFor from '../commands/useGeminiFor.js';
 import { makeExecute as makeAskExecute, data as askData } from '../commands/ask.js';
 import { makeExecute as makeBriefExecute, data as briefData } from '../commands/brief.js';
 import { makeExecute as makeRegenArtExecute, data as regenArtData } from '../commands/regenArt.js';
+import * as help from '../commands/help.js';
 import { handleNeedsReviewButton, isNeedsReviewButton } from './needsReviewButtons.js';
 import { handlePlayerReviewButton, isPlayerReviewButton } from './playerReviewButtons.js';
 
@@ -84,7 +85,8 @@ export function wireInteractionHandler(
         sessionArtDir: deps.sessionArtDir,
         sessionArtTimeoutMs: deps.sessionArtTimeoutMs
       })
-    }
+    },
+    help
   };
   client.on('interactionCreate', async (interaction: Interaction) => {
     try {
