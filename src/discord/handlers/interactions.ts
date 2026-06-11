@@ -14,6 +14,7 @@ import * as driveFolder from '../commands/driveFolder.js';
 import { makeExecute as makeCheckDriveExecute, data as checkDriveData } from '../commands/checkDrive.js';
 import * as useGeminiFor from '../commands/useGeminiFor.js';
 import { makeExecute as makeAskExecute, data as askData } from '../commands/ask.js';
+import { makeExecute as makeBriefExecute, data as briefData } from '../commands/brief.js';
 import { handleNeedsReviewButton, isNeedsReviewButton } from './needsReviewButtons.js';
 import { handlePlayerReviewButton, isPlayerReviewButton } from './playerReviewButtons.js';
 
@@ -30,6 +31,12 @@ export interface InteractionHandlerDeps {
   askTopK: number;
   embedTimeoutMs: number;
   askTimeoutMs: number;
+  // Stage 9 — /brief
+  briefModel: string;
+  briefLanguageHint: string;
+  briefTimeoutMs: number;
+  briefRecentSessions: number;
+  briefMemoriesPerCharacter: number;
 }
 
 export function wireInteractionHandler(
@@ -53,6 +60,16 @@ export function wireInteractionHandler(
         topK: deps.askTopK,
         embedTimeoutMs: deps.embedTimeoutMs,
         askTimeoutMs: deps.askTimeoutMs
+      })
+    },
+    [briefData.name]: {
+      execute: makeBriefExecute({
+        log,
+        briefModel: deps.briefModel,
+        briefLanguageHint: deps.briefLanguageHint,
+        briefTimeoutMs: deps.briefTimeoutMs,
+        recentSessionsToInclude: deps.briefRecentSessions,
+        memoriesToInclude: deps.briefMemoriesPerCharacter
       })
     }
   };

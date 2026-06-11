@@ -68,6 +68,29 @@ const Env = z.object({
   ASK_TOP_K: z.coerce.number().int().positive().default(10),
   ASK_TIMEOUT_MS: z.coerce.number().int().positive().default(60 * 1000),
 
+  // Stage 9 — session art. One image per session, generated after the
+  // summary lands. ~$0.04/image at imagen-3.0-generate-002, posted alongside
+  // the recap. Idempotent: if an ArtPiece exists for the session, gen is
+  // skipped so retries don't double-charge.
+  SESSION_ART_ENABLED: z
+    .union([z.literal('true'), z.literal('false')])
+    .default('true')
+    .transform((v) => v === 'true'),
+  SESSION_ART_MODEL: z.string().default('imagen-3.0-generate-002'),
+  SESSION_ART_DIR: z.string().default('/app/data/session_art'),
+  SESSION_ART_TIMEOUT_MS: z.coerce.number().int().positive().default(60 * 1000),
+
+  // Stage 9 — /brief admin command. Per-character pre-session DMs from
+  // Rikk. Uses gemini-2.5-flash by default; ~$0.001 per character per call,
+  // so a 5-player /brief costs roughly half a cent.
+  BRIEF_MODEL: z.string().default('gemini-2.5-flash'),
+  BRIEF_LANGUAGE_HINT: z.string().default('es'),
+  BRIEF_TIMEOUT_MS: z.coerce.number().int().positive().default(60 * 1000),
+  // How many of the most recent sessions to include as dossier context.
+  BRIEF_RECENT_SESSIONS: z.coerce.number().int().positive().default(3),
+  // How many of the character's standing memories to surface per brief.
+  BRIEF_MEMORIES_PER_CHARACTER: z.coerce.number().int().positive().default(10),
+
   NODE_ENV: z.enum(['development', 'production', 'test']).default('production')
 });
 

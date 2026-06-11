@@ -37,6 +37,7 @@ import { withGeminiRateLimitRetry } from './gemini.js';
 import { parseInfoFile, normalizeUsername } from './infoFile.js';
 import { reconcileSession, type PerTrackExtraction } from './reconcile.js';
 import { postOneScheduledRecap } from './recapPoster.js';
+import { generateSessionArt } from './sessionArt.js';
 import { summarizeSession } from './summarize.js';
 import { transcribeAudioFile } from './transcribe.js';
 import { parseOggUsers } from './users.js';
@@ -91,6 +92,11 @@ interface WorkerConfig {
   embedModel: string;
   embedMaxAttempts: number;
   embedTimeoutMs: number;
+  // Stage 9 — session art (one image per session, attached to recap)
+  sessionArtEnabled: boolean;
+  sessionArtModel: string;
+  sessionArtDir: string;
+  sessionArtTimeoutMs: number;
 }
 
 interface WorkerHandle {
@@ -1034,6 +1040,28 @@ async function processOneSummarize(
       },
       'session summarized and ready'
     );
+
+    // Stage 9 — session art (best-effort; never blocks the recap path).
+    // Idempotent: skips if an ArtPiece already exists for this session,
+    // so summarize retries don't double-charge the image API.
+    if (config.sessionArtEnabled) {
+      try {
+        await generateSessionArt({
+          prisma,
+          sessionId: session.id,
+          model: config.sessionArtModel,
+          outputDir: config.sessionArtDir,
+          timeoutMs: config.sessionArtTimeoutMs,
+          log
+        });
+      } catch (artErr) {
+        const artMessage = artErr instanceof Error ? artErr.message : String(artErr);
+        log.warn(
+          { err: artMessage, sessionId: session.id },
+          'session art generation failed — recap will post without an image'
+        );
+      }
+    }
     return true;
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

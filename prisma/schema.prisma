@@ -91,6 +91,11 @@ model Character {
   // time — populated by the user or learned over time.
   personality  String?
   voiceNotes   String?  @map("voice_notes")
+  // Physical description used when generating session art. Nullable — if
+  // present, the image generator weaves it into the prompt so visuals
+  // match the established look. Free-form: hair color, build, clothing,
+  // distinguishing marks, etc.
+  appearance   String?
   active       Boolean  @default(true)
   createdAt    DateTime @default(now()) @map("created_at")
 

@@ -9,8 +9,13 @@
 //   - campaignId set + summary exists (we wouldn't be READY otherwise, but
 //     belt-and-braces)
 //
-// And posts an embed to that campaign's text channel via discord.js.
-import { EmbedBuilder } from 'discord.js';
+// And posts an embed to that campaign's text channel via discord.js. If a
+// session ArtPiece exists and its file is on disk, it's attached as the
+// embed image. Missing art is silently skipped — never blocks the post.
+import { promises as fs } from 'node:fs';
+import path from 'node:path';
+
+import { AttachmentBuilder, EmbedBuilder } from 'discord.js';
 import type { FastifyBaseLogger } from 'fastify';
 
 import { getPrisma } from '../db.js';
@@ -59,7 +64,13 @@ export async function postOneScheduledRecap(
     orderBy: { recapScheduledFor: 'asc' },
     include: {
       summary: true,
-      campaign: { select: { id: true, name: true, discordTextChannelId: true } }
+      campaign: { select: { id: true, name: true, discordTextChannelId: true } },
+      // Stage 9 — pick up the generated session art if one exists. We
+      // ordered by createdAt so a regenerated row beats the original.
+      artPieces: {
+        orderBy: { createdAt: 'desc' },
+        take: 1
+      }
     }
   });
   if (!session || !session.summary || !session.campaign) return false;
@@ -95,7 +106,36 @@ export async function postOneScheduledRecap(
       .addFields({ name: '✨ Eventos clave', value: formatKeyEvents(events).slice(0, 1024) })
       .setFooter({ text: 'Pregúntame con /ask "..." (próximamente)' });
 
-    await channel.send({ embeds: [embed] });
+    // Stage 9 — if a session ArtPiece is on disk, attach it as the embed
+    // image. Missing files are logged and skipped; never blocks the post.
+    const artPiece = session.artPieces[0] ?? null;
+    let attachment: AttachmentBuilder | null = null;
+    let markArtPosted: string | null = null;
+    if (artPiece?.filePath) {
+      try {
+        await fs.access(artPiece.filePath);
+        const filename = path.basename(artPiece.filePath);
+        attachment = new AttachmentBuilder(artPiece.filePath, { name: filename });
+        embed.setImage(`attachment://${filename}`);
+        markArtPosted = artPiece.id;
+      } catch {
+        log.warn(
+          { sessionId: session.id, artPieceId: artPiece.id, filePath: artPiece.filePath },
+          'session art file missing on disk — posting recap without image'
+        );
+      }
+    }
+
+    await channel.send(
+      attachment ? { embeds: [embed], files: [attachment] } : { embeds: [embed] }
+    );
+
+    if (markArtPosted) {
+      await prisma.artPiece.update({
+        where: { id: markArtPosted },
+        data: { posted: true }
+      });
+    }
 
     await prisma.session.update({
       where: { id: session.id },

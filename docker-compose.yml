@@ -94,6 +94,16 @@ services:
       ASK_MODEL: ${ASK_MODEL:-gemini-2.5-flash}
       ASK_TOP_K: ${ASK_TOP_K:-10}
       ASK_TIMEOUT_MS: ${ASK_TIMEOUT_MS:-60000}
+      # Stage 9 — session art + /brief
+      SESSION_ART_ENABLED: ${SESSION_ART_ENABLED:-true}
+      SESSION_ART_MODEL: ${SESSION_ART_MODEL:-imagen-3.0-generate-002}
+      SESSION_ART_DIR: ${SESSION_ART_DIR:-/app/data/session_art}
+      SESSION_ART_TIMEOUT_MS: ${SESSION_ART_TIMEOUT_MS:-60000}
+      BRIEF_MODEL: ${BRIEF_MODEL:-gemini-2.5-flash}
+      BRIEF_LANGUAGE_HINT: ${BRIEF_LANGUAGE_HINT:-es}
+      BRIEF_TIMEOUT_MS: ${BRIEF_TIMEOUT_MS:-60000}
+      BRIEF_RECENT_SESSIONS: ${BRIEF_RECENT_SESSIONS:-3}
+      BRIEF_MEMORIES_PER_CHARACTER: ${BRIEF_MEMORIES_PER_CHARACTER:-10}
     ports:
       # Exposed for local curl testing. In Dokploy you'll typically route via
       # Traefik instead; can be removed once Chronicler is talking to us
@@ -106,6 +116,9 @@ services:
       # in our stack — Chronicler never touches it. Layout:
       #   /app/data/cooked/<sessionId>/<chapterIndex>/<track>_<user>.flac
       - 'barkeep_cooked:/app/data/cooked'
+      # Stage 9 — per-session generated art (PNG, one per session). Mounted
+      # so a container rebuild doesn't drop already-generated images.
+      - 'barkeep_art:/app/data/session_art'
     healthcheck:
       test: ['CMD', 'node', '-e', "require('http').get('http://127.0.0.1:3001/health', r => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"]
       interval: 30s
@@ -115,6 +128,7 @@ services:
 volumes:
   barkeep_db:
   barkeep_cooked:
+  barkeep_art:
   craig_rec:
     external: true
     # Override at deploy time via env or hard-code here once you know the

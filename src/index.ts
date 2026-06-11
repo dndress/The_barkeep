@@ -36,7 +36,12 @@ async function main(): Promise<void> {
             askModel: config.ASK_MODEL,
             askTopK: config.ASK_TOP_K,
             embedTimeoutMs: config.EMBED_TIMEOUT_MS,
-            askTimeoutMs: config.ASK_TIMEOUT_MS
+            askTimeoutMs: config.ASK_TIMEOUT_MS,
+            briefModel: config.BRIEF_MODEL,
+            briefLanguageHint: config.BRIEF_LANGUAGE_HINT,
+            briefTimeoutMs: config.BRIEF_TIMEOUT_MS,
+            briefRecentSessions: config.BRIEF_RECENT_SESSIONS,
+            briefMemoriesPerCharacter: config.BRIEF_MEMORIES_PER_CHARACTER
           });
           if (config.DISCORD_GUILD_ID) {
             try {
@@ -88,7 +93,11 @@ async function main(): Promise<void> {
       whisperStopDays: config.WHISPER_STOP_DAYS,
       embedModel: config.EMBED_MODEL,
       embedMaxAttempts: config.EMBED_MAX_ATTEMPTS,
-      embedTimeoutMs: config.EMBED_TIMEOUT_MS
+      embedTimeoutMs: config.EMBED_TIMEOUT_MS,
+      sessionArtEnabled: config.SESSION_ART_ENABLED,
+      sessionArtModel: config.SESSION_ART_MODEL,
+      sessionArtDir: config.SESSION_ART_DIR,
+      sessionArtTimeoutMs: config.SESSION_ART_TIMEOUT_MS
     },
     app.log
   );
