@@ -41,7 +41,10 @@ async function main(): Promise<void> {
             briefLanguageHint: config.BRIEF_LANGUAGE_HINT,
             briefTimeoutMs: config.BRIEF_TIMEOUT_MS,
             briefRecentSessions: config.BRIEF_RECENT_SESSIONS,
-            briefMemoriesPerCharacter: config.BRIEF_MEMORIES_PER_CHARACTER
+            briefMemoriesPerCharacter: config.BRIEF_MEMORIES_PER_CHARACTER,
+            sessionArtModel: config.SESSION_ART_MODEL,
+            sessionArtDir: config.SESSION_ART_DIR,
+            sessionArtTimeoutMs: config.SESSION_ART_TIMEOUT_MS
           });
           if (config.DISCORD_GUILD_ID) {
             try {

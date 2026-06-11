@@ -15,6 +15,7 @@ import { makeExecute as makeCheckDriveExecute, data as checkDriveData } from '..
 import * as useGeminiFor from '../commands/useGeminiFor.js';
 import { makeExecute as makeAskExecute, data as askData } from '../commands/ask.js';
 import { makeExecute as makeBriefExecute, data as briefData } from '../commands/brief.js';
+import { makeExecute as makeRegenArtExecute, data as regenArtData } from '../commands/regenArt.js';
 import { handleNeedsReviewButton, isNeedsReviewButton } from './needsReviewButtons.js';
 import { handlePlayerReviewButton, isPlayerReviewButton } from './playerReviewButtons.js';
 
@@ -37,6 +38,10 @@ export interface InteractionHandlerDeps {
   briefTimeoutMs: number;
   briefRecentSessions: number;
   briefMemoriesPerCharacter: number;
+  // Stage 9 — /regen-art
+  sessionArtModel: string;
+  sessionArtDir: string;
+  sessionArtTimeoutMs: number;
 }
 
 export function wireInteractionHandler(
@@ -70,6 +75,14 @@ export function wireInteractionHandler(
         briefTimeoutMs: deps.briefTimeoutMs,
         recentSessionsToInclude: deps.briefRecentSessions,
         memoriesToInclude: deps.briefMemoriesPerCharacter
+      })
+    },
+    [regenArtData.name]: {
+      execute: makeRegenArtExecute({
+        log,
+        sessionArtModel: deps.sessionArtModel,
+        sessionArtDir: deps.sessionArtDir,
+        sessionArtTimeoutMs: deps.sessionArtTimeoutMs
       })
     }
   };
