@@ -31,18 +31,85 @@ interface KeyEventLike {
   importance: number;
 }
 
-function formatKeyEvents(events: KeyEventLike[]): string {
-  if (events.length === 0) return '_(none)_';
-  return events
-    .slice(0, 8)
-    .sort((a, b) => b.importance - a.importance)
-    .map((e) => {
-      const who = e.characters_involved?.length
-        ? ` _(${e.characters_involved.join(', ')})_`
-        : '';
-      return `• ${e.description}${who}`;
-    })
-    .join('\n');
+// Discord embed limits we respect:
+//   - field value:  1024 chars
+//   - field count:  25 per embed
+//   - total embed:  6000 chars (title + desc + all field names/values + footer)
+const FIELD_VALUE_CAP = 1024;
+const FIELD_NAME_PRIMARY = '✨ Eventos clave';
+const FIELD_NAME_CONT = '✨ Eventos clave (cont.)';
+
+function renderEventBullet(e: KeyEventLike): string {
+  const who = e.characters_involved?.length
+    ? ` _(${e.characters_involved.join(', ')})_`
+    : '';
+  return `• ${e.description}${who}`;
+}
+
+/**
+ * Pack a list of pre-rendered bullets into Discord field values, each ≤ cap chars.
+ * Splits only on bullet boundaries. A single oversize bullet is hard-truncated
+ * with an ellipsis (last resort — shouldn't happen with current event sizes).
+ */
+function packBulletsIntoFields(bullets: string[], cap: number): string[] {
+  const fields: string[] = [];
+  let buf = '';
+  for (const raw of bullets) {
+    const bullet = raw.length > cap ? raw.slice(0, cap - 1) + '…' : raw;
+    const sep = buf ? '\n' : '';
+    if (buf.length + sep.length + bullet.length > cap) {
+      if (buf) fields.push(buf);
+      buf = bullet;
+    } else {
+      buf += sep + bullet;
+    }
+  }
+  if (buf) fields.push(buf);
+  return fields;
+}
+
+interface EventField {
+  name: string;
+  value: string;
+}
+
+/**
+ * Build the embed fields for key events, respecting Discord limits.
+ * Drops overflow bullets (least-important first, since input is importance-sorted desc)
+ * and appends a "(+N más)" footer line when truncation occurs.
+ *
+ * @param remainingBudget total chars still available in the embed (6000 - already used).
+ */
+function buildKeyEventFields(
+  events: KeyEventLike[],
+  remainingBudget: number
+): EventField[] {
+  if (events.length === 0) {
+    return [{ name: FIELD_NAME_PRIMARY, value: '_(none)_' }];
+  }
+  const sorted = [...events].sort((a, b) => b.importance - a.importance);
+
+  // Try to fit all events; if we exceed budget or field count, drop the
+  // lowest-importance tail until we fit, leaving room for a "(+N más)" note.
+  for (let keep = sorted.length; keep >= 0; keep--) {
+    const dropped = sorted.length - keep;
+    const bullets = sorted.slice(0, keep).map(renderEventBullet);
+    if (dropped > 0) bullets.push(`_(+${dropped} eventos más)_`);
+    if (bullets.length === 0) {
+      return [{ name: FIELD_NAME_PRIMARY, value: '_(none)_' }];
+    }
+    const packed = packBulletsIntoFields(bullets, FIELD_VALUE_CAP);
+    // Cap field count at 24 (leave 1 slot of safety margin under Discord's 25).
+    if (packed.length > 24) continue;
+
+    const fields: EventField[] = packed.map((value, i) => ({
+      name: i === 0 ? FIELD_NAME_PRIMARY : FIELD_NAME_CONT,
+      value
+    }));
+    const totalCost = fields.reduce((s, f) => s + f.name.length + f.value.length, 0);
+    if (totalCost <= remainingBudget) return fields;
+  }
+  return [{ name: FIELD_NAME_PRIMARY, value: '_(none)_' }];
 }
 
 export async function postOneScheduledRecap(
@@ -97,14 +164,20 @@ export async function postOneScheduledRecap(
     const events = Array.isArray(session.summary.keyEvents)
       ? (session.summary.keyEvents as unknown as KeyEventLike[])
       : [];
+    const title = `📜 ${session.campaign.name} — Session ${session.sessionNumber ?? '?'}`;
+    const description = session.summary.short.slice(0, 4000);
+    const footer = 'Pregúntame con /ask "..." (próximamente)';
+    // Discord embed total cap = 6000. Subtract everything we know about
+    // before sizing the events fields. Keep a 100-char safety margin.
+    const remainingBudget = 6000 - title.length - description.length - footer.length - 100;
+    const eventFields = buildKeyEventFields(events, remainingBudget);
+
     const embed = new EmbedBuilder()
-      .setTitle(
-        `📜 ${session.campaign.name} — Session ${session.sessionNumber ?? '?'}`
-      )
-      .setDescription(session.summary.short.slice(0, 4000))
+      .setTitle(title)
+      .setDescription(description)
       .setColor(0xb87333)
-      .addFields({ name: '✨ Eventos clave', value: formatKeyEvents(events).slice(0, 1024) })
-      .setFooter({ text: 'Pregúntame con /ask "..." (próximamente)' });
+      .addFields(eventFields)
+      .setFooter({ text: footer });
 
     // Stage 9 — if a session ArtPiece is on disk, attach it as the embed
     // image. Missing files are logged and skipped; never blocks the post.
