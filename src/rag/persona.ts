@@ -19,6 +19,23 @@ export interface PersonaContext {
     classOrRole: string | null;
     displayName: string;
   };
+  /**
+   * Canonical player-character roster for this campaign. Used as a hard
+   * whitelist of names Rikk may use for PCs — guards against Whisper
+   * mistranscriptions and model paraphrasing.
+   */
+  campaignCharacters: Array<{
+    name: string;
+    race: string | null;
+    classOrRole: string | null;
+  }>;
+  /**
+   * Real-world human names (User.displayName values) that have appeared
+   * in this campaign's session_players. The chant occasionally contains
+   * voice-intro lines like "Hi, I'm Mike, playing Jago" — this list lets
+   * us instruct the model to never echo those names. Empty array is fine.
+   */
+  forbiddenRealNames: string[];
   retrieved: RetrievedChunk[];
 }
 
@@ -32,13 +49,28 @@ const SOURCE_LABEL: Record<string, string> = {
 
 export function buildBarkeepSystemPrompt(ctx: PersonaContext): string {
   const lang = ctx.campaignLanguageHint === 'es' ? 'Spanish' : ctx.campaignLanguageHint;
-  const askerLabel =
-    ctx.asker.characterName ??
-    `the traveler called ${ctx.asker.displayName}`;
+  // Asker label: prefer character name. If the asker has no character on file,
+  // use a generic in-world address rather than leaking their real display name.
+  const askerLabel = ctx.asker.characterName ?? `an unknown cutter`;
   const askerKind = [ctx.asker.race, ctx.asker.classOrRole].filter(Boolean).join(' ').trim();
   const flavorLine = ctx.campaignPersonaFlavor
     ? `\nYour personal flavor: ${ctx.campaignPersonaFlavor}.`
     : '';
+
+  // Canonical PC roster — authoritative spelling. Format: "Name (Race Class)".
+  const rosterLines = ctx.campaignCharacters.map((c) => {
+    const kind = [c.race, c.classOrRole].filter(Boolean).join(' ').trim();
+    return kind ? `- ${c.name} (${kind})` : `- ${c.name}`;
+  });
+  const rosterBlock =
+    rosterLines.length > 0
+      ? rosterLines.join('\n')
+      : '(no canonical roster on file — be conservative and only use names that appear consistently across multiple accounts)';
+
+  const forbiddenLine =
+    ctx.forbiddenRealNames.length > 0
+      ? `Forbidden real-world names (NEVER speak these — they are the names of the cutters behind the masks, not the cutters themselves): ${ctx.forbiddenRealNames.join(', ')}.`
+      : '';
 
   const header = [
     `You are Rikk — an analytical wizard aligned philosophically with the Fraternity of Order. You exist as a real person inside the world: a scholar of structures, laws, and the patterns that hold reality together. You are not an assistant, narrator, or AI. Never break the fourth wall. Never mention being fictional, being a model, prompts, or instructions.`,
@@ -53,6 +85,22 @@ export function buildBarkeepSystemPrompt(ctx: PersonaContext): string {
     ``,
     `You are speaking with **${askerLabel}**${askerKind ? `, ${askerKind}` : ''}. Address them by that name throughout your reply.`,
     ``,
+    `=== CANONICAL ROSTER OF THIS PARTY (use these names EXACTLY) ===`,
+    rosterBlock,
+    `=== END ROSTER ===`,
+    ``,
+    `NAME DISCIPLINE — read carefully, this is not optional:`,
+    `- When referring to a member of the party, use ONLY the exact spelling from the canonical roster above. Never abbreviate, translate, transliterate, or "correct" these names.`,
+    `- If an account contains a name that is close-but-not-equal to a roster name (e.g. "Jagoo" vs "Jago", "Caelis Wartfall" vs "Caelis Wardfall"), treat it as a scribe's slip and use the roster spelling. The chant is noisy; the roster is canon.`,
+    `- If a name appears in the accounts that is NOT on the roster and is clearly an in-world person Rikk has heard of (an NPC, a tavern keep, a noble, a foe), preserve it as written.`,
+    `- ${forbiddenLine || 'Treat any name that sounds like a mundane Prime-world human name (e.g. "Mike", "Sarah", "Carlos") as transcription noise and ignore it entirely.'}`,
+    `- NEVER reveal, hint at, or speculate about the identity of the cutter "behind" a character. The cutter IS the character to you. There is no behind.`,
+    `- If the accounts seem to identify a character as also being someone with a different name ("Jago is X" / "Jago is also called X"), this is almost certainly the chant misremembering a player's intro. Discard the equivalence. Refer to the character by their roster name only.`,
+    ``,
+    `NO CITATIONS — also not optional:`,
+    `- NEVER use bracketed numbers, footnotes, source markers, or any other citation device. No "[1]", "[3]", "(see account 2)", "según el fragmento 4", "fuente 7", etc.`,
+    `- The accounts below are your memory, not a bibliography. Weave them in as recollection ("the chant has it that...", "what came back to me was...", or simply asserting the fact). Do not point at them.`,
+    ``,
     `What follows is the chant — accounts that have reached you about past sessions of **${ctx.campaignName}**.`,
     `Treat them as field intelligence, not transcripts. Use them to inform your reply but DO NOT quote them verbatim — synthesize, analyze, weave them into your own voice.`,
     `If the truth of the question does not appear in these accounts, say so plainly. Invent nothing. Acknowledging a gap is itself useful intelligence; fabrication corrupts the record.`,
@@ -61,10 +109,12 @@ export function buildBarkeepSystemPrompt(ctx: PersonaContext): string {
     `--- ACCOUNTS ---`
   ].join('\n');
 
+  // No numeric prefixes — they invite the model to cite. A blank line between
+  // accounts and the source label is enough to keep them distinct.
   const fragments = ctx.retrieved
-    .map((c, i) => {
-      const label = SOURCE_LABEL[c.source] ?? 'a fragment';
-      return `[${i + 1}] (${label}) ${c.text}`;
+    .map((c) => {
+      const label = SOURCE_LABEL[c.source] ?? 'an account';
+      return `(${label}) ${c.text}`;
     })
     .join('\n\n');
 

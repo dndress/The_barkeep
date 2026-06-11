@@ -75,6 +75,31 @@ export async function ask(opts: AskOptions): Promise<AskResult | AskFailure> {
     if (recent?.character) askerCharacter = recent.character;
   }
 
+  // 2b. Canonical roster — authoritative spelling for every active PC.
+  // Drives the NAME DISCIPLINE block in the persona prompt.
+  const campaignCharacters = await prisma.character.findMany({
+    where: { campaignId: campaign.id, active: true },
+    select: { name: true, race: true, classOrRole: true },
+    orderBy: { name: 'asc' }
+  });
+
+  // 2c. Forbidden real-world names — every display_name belonging to a user
+  // who has appeared as a player or DM in this campaign. The chant often
+  // contains voice-intro lines that name the cutter behind the mask; this
+  // gives the model an explicit "do not echo" list.
+  const sessionPlayers = await prisma.sessionPlayer.findMany({
+    where: { session: { campaignId: campaign.id } },
+    select: { userId: true, user: { select: { displayName: true } } },
+    distinct: ['userId']
+  });
+  const forbiddenRealNames: string[] = Array.from(
+    new Set(
+      sessionPlayers
+        .map((sp: { user: { displayName: string } }) => sp.user.displayName.trim())
+        .filter((n: string) => n.length > 0)
+    )
+  );
+
   // 3. Embed the question + search.
   let queryEmbedding: number[];
   try {
@@ -118,6 +143,8 @@ export async function ask(opts: AskOptions): Promise<AskResult | AskFailure> {
       classOrRole: askerCharacter?.classOrRole ?? null,
       displayName: user?.displayName ?? 'unknown cutter'
     },
+    campaignCharacters,
+    forbiddenRealNames,
     retrieved
   });
 
@@ -160,3 +187,4 @@ export async function ask(opts: AskOptions): Promise<AskResult | AskFailure> {
     retrievedCount: retrieved.length
   };
 }
+
