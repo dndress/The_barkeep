@@ -20,7 +20,10 @@ export async function buildServer(config: AppConfig): Promise<FastifyInstance> {
   // Tiny liveness probe for Dokploy / docker healthcheck.
   app.get('/health', async () => ({ status: 'ok' }));
 
-  await app.register(webhookRoutes, { webhookSecret: config.BARKEEP_WEBHOOK_SECRET });
+  await app.register(webhookRoutes, {
+    webhookSecret: config.BARKEEP_WEBHOOK_SECRET,
+    recapDelayHours: config.RECAP_DELAY_HOURS
+  });
 
   return app;
 }

@@ -23,10 +23,9 @@ import { ChroniclerWebhookSchema, type ChroniclerWebhookPayload } from './schema
 
 interface WebhookRouteOptions {
   webhookSecret: string;
+  /** Hours to wait after endedAt before posting the recap. From RECAP_DELAY_HOURS env. */
+  recapDelayHours: number;
 }
-
-/** 10-hour recap delay, per design decision. Configurable later. */
-const RECAP_DELAY_MS = 10 * 60 * 60 * 1000;
 
 function safeEqual(a: string, b: string): boolean {
   const ab = Buffer.from(a, 'utf8');
@@ -35,7 +34,10 @@ function safeEqual(a: string, b: string): boolean {
   return timingSafeEqual(ab, bb);
 }
 
-async function persistChapter(p: ChroniclerWebhookPayload): Promise<{
+async function persistChapter(
+  p: ChroniclerWebhookPayload,
+  recapDelayMs: number
+): Promise<{
   sessionId: string;
   chapterId: string;
   isFirstChapter: boolean;
@@ -97,7 +99,7 @@ async function persistChapter(p: ChroniclerWebhookPayload): Promise<{
       where: { id: session.id },
       data: {
         endedAt,
-        recapScheduledFor: new Date(endedAt.getTime() + RECAP_DELAY_MS)
+        recapScheduledFor: new Date(endedAt.getTime() + recapDelayMs)
       }
     });
   }
@@ -106,6 +108,7 @@ async function persistChapter(p: ChroniclerWebhookPayload): Promise<{
 }
 
 export const webhookRoutes: FastifyPluginAsync<WebhookRouteOptions> = async (app, opts) => {
+  const recapDelayMs = opts.recapDelayHours * 60 * 60 * 1000;
   app.post('/api/recordings/complete', async (req, reply) => {
     const sentSecret = req.headers['x-webhook-secret'];
     if (typeof sentSecret !== 'string' || !safeEqual(sentSecret, opts.webhookSecret)) {
@@ -121,7 +124,7 @@ export const webhookRoutes: FastifyPluginAsync<WebhookRouteOptions> = async (app
     const p = parsed.data;
 
     try {
-      const result = await persistChapter(p);
+      const result = await persistChapter(p, recapDelayMs);
       req.log.info(
         {
           recordingId: p.recordingId,
