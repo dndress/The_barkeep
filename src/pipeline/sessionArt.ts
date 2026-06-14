@@ -144,19 +144,38 @@ export async function generateSessionArt(
   ];
   const imagePrompt = promptParts.filter(Boolean).join(' ');
 
-  // 6. Call Imagen.
+  // 6. Call Gemini 2.5 Flash Image (Nano Banana) via generateContent.
+  //    Migrated off Imagen 2026-06-13: Imagen models are deprecated and shut
+  //    down on 2026-06-24, and Gemini Image's 32K-token prompt window means
+  //    multi-PC scenes no longer risk silent prompt truncation.
+  //    Response shape: candidates[0].content.parts[] — one part contains
+  //    inlineData.data (base64 PNG) for the generated image, possibly with
+  //    a text part alongside it. We pull the first inlineData payload.
   const ai = getGemini();
   log.info(
     { sessionId, model: opts.model, promptChars: imagePrompt.length },
     'generating session art'
   );
+
+  interface GeminiImagePart {
+    text?: string;
+    inlineData?: { mimeType?: string; data?: string };
+  }
+  interface GeminiImageResponse {
+    candidates?: Array<{
+      content?: { parts?: GeminiImagePart[] };
+    }>;
+  }
+
   const response = (await Promise.race([
-    ai.models.generateImages({
+    ai.models.generateContent({
       model: opts.model,
-      prompt: imagePrompt,
+      contents: imagePrompt,
       config: {
-        numberOfImages: 1,
-        aspectRatio: '16:9'
+        // Gemini 2.5 Flash Image supports aspect ratios via imageConfig
+        // (added when the model went GA in late 2025). Default is 1:1 if
+        // omitted, so we set explicitly to keep recap embeds widescreen.
+        imageConfig: { aspectRatio: '16:9' }
       }
     }),
     new Promise<never>((_, reject) =>
@@ -165,11 +184,14 @@ export async function generateSessionArt(
         opts.timeoutMs
       )
     )
-  ])) as { generatedImages?: Array<{ image?: { imageBytes?: string } }> };
+  ])) as GeminiImageResponse;
 
-  const imageBytes = response.generatedImages?.[0]?.image?.imageBytes;
+  const imagePart = response.candidates?.[0]?.content?.parts?.find(
+    (p) => Boolean(p.inlineData?.data)
+  );
+  const imageBytes = imagePart?.inlineData?.data;
   if (!imageBytes) {
-    throw new Error('session art: Imagen returned no image bytes');
+    throw new Error('session art: Gemini returned no image bytes');
   }
 
   // 7. Persist to disk.
