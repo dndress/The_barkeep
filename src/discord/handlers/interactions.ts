@@ -18,6 +18,7 @@ import { makeExecute as makeBriefExecute, data as briefData } from '../commands/
 import { makeExecute as makeRegenArtExecute, data as regenArtData } from '../commands/regenArt.js';
 import * as help from '../commands/help.js';
 import * as listSessions from '../commands/listSessions.js';
+import * as recall from '../commands/recall.js';
 import { handleNeedsReviewButton, isNeedsReviewButton } from './needsReviewButtons.js';
 import { handlePlayerReviewButton, isPlayerReviewButton } from './playerReviewButtons.js';
 
@@ -88,7 +89,8 @@ export function wireInteractionHandler(
       })
     },
     help,
-    'list-sessions': listSessions
+    'list-sessions': listSessions,
+    recall
   };
   client.on('interactionCreate', async (interaction: Interaction) => {
     try {

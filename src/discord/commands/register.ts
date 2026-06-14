@@ -4,7 +4,7 @@
 //   - Guild-scoped propagates instantly; global takes up to an hour.
 //   - The bot only lives in one guild for now; no need for global reach.
 //
-// Discord dedupes by command name on registration, so it's idempotent —
+// Discord dedupes by command name on registration, so it's idempotent --
 // re-running on every boot is fine and ensures any name/description
 // changes propagate without manual intervention.
 import type { Client } from 'discord.js';
@@ -22,6 +22,7 @@ import { data as briefData } from './brief.js';
 import { data as regenArtData } from './regenArt.js';
 import { data as helpData } from './help.js';
 import { data as listSessionsData } from './listSessions.js';
+import { data as recallData } from './recall.js';
 
 export async function registerSlashCommands(
   client: Client,
@@ -29,7 +30,7 @@ export async function registerSlashCommands(
   log: FastifyBaseLogger
 ): Promise<void> {
   if (!client.application) {
-    throw new Error('client.application is null at registration time — client must be ready');
+    throw new Error('client.application is null at registration time -- client must be ready');
   }
   const guild = await client.guilds.fetch(guildId);
   const commands = [
@@ -44,7 +45,8 @@ export async function registerSlashCommands(
     briefData.toJSON(),
     regenArtData.toJSON(),
     helpData.toJSON(),
-    listSessionsData.toJSON()
+    listSessionsData.toJSON(),
+    recallData.toJSON()
   ];
   await guild.commands.set(commands);
   log.info({ guildId, count: commands.length }, 'slash commands registered');
