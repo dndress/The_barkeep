@@ -82,9 +82,16 @@ function parseRosterFromPayload(payload: string): InfoRoster | null {
   const parts = splitNotePayload(payload);
   if (parts.length < 2) return null;
 
-  // First segment is the campaign line — it must NOT be a "name: value"
-  // pair itself. ("PF2E - Hellknight Hill" qualifies.)
-  const campaignRaw = parts[0]!;
+  // First segment is the campaign line. Accept two forms:
+  //   (a) bare:     "PF2E - Hellknight Hill"
+  //   (b) labeled:  "Campaign: PF2E - Hellknight Hill"  (Craig newer info.txt)
+  // Strip the label so downstream sees "PF2E - Hellknight Hill" either way.
+  let campaignRaw = parts[0]!;
+  if (!campaignRaw) return null;
+  const labeled = /^(?:campaign|campa[ñn]a|campaign\s*name)\s*:\s*(.+)$/i.exec(campaignRaw);
+  if (labeled) campaignRaw = labeled[1]!.trim();
+  // After (optional) label strip, the line must NOT itself be a "name: value"
+  // pair (would be ambiguous with a roster entry).
   if (!campaignRaw || /^\S+\s*:/.test(campaignRaw)) return null;
 
   const entries: InfoRosterEntry[] = [];

@@ -80,7 +80,8 @@ const USERS: SeedUser[] = [
   { discordUserId: '1020800023350489108', discordUsername: '_danielgallego',         displayName: 'Daniel Gallego' },
   { discordUserId: '925758694799572992',  discordUsername: 'andreaarango118',        displayName: 'Andrea Arango' },
   // Bots — cook skips creating AudioFile rows for them.
-  { discordUserId: '1145363441524166758', discordUsername: 'matchbox',               displayName: 'MatchBox (music bot)', isBot: true }
+  { discordUserId: '1145363441524166758', discordUsername: 'matchbox',               displayName: 'MatchBox (music bot)', isBot: true },
+  { discordUserId: '272937604339466240',  discordUsername: 'Craig',                  displayName: 'Craig (backup recorder)', isBot: true }
 ];
 
 const CAMPAIGNS: SeedCampaign[] = [

@@ -36,10 +36,17 @@ function coerceString(v: unknown): string | undefined {
 
 function entryToUser(trackIndex: number, raw: RawUserEntry | null | undefined): OggUser | null {
   if (!raw || typeof raw !== 'object') return null;
+  const discordUserId = coerceString(raw.id);
+  const discordUsername = coerceString(raw.username);
+  // Craig's .ogg.users sidecar starts with a `"0": {}` anchor entry so the
+  // fragment stream parses as JSON. Drop any entry with neither id nor
+  // username — there is no real user behind it and creating an AudioFile
+  // row would block the session forever (no transcript ever arrives).
+  if (!discordUserId && !discordUsername) return null;
   return {
     trackIndex,
-    discordUserId: coerceString(raw.id),
-    discordUsername: coerceString(raw.username),
+    discordUserId,
+    discordUsername,
     discordDisplayName: coerceString(raw.name)
   };
 }

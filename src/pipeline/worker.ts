@@ -313,8 +313,9 @@ async function processOneChapter(config: WorkerConfig, log: FastifyBaseLogger): 
           fileSizeBytes: 0
         }));
 
-    let unknownUserCount = 0;
+    let unknownUserSkipCount = 0;
     let botSkipCount = 0;
+    let createdCount = 0;
     for (const file of trackEntries) {
       const u = userByTrack.get(file.trackIndex);
       // Skip bot tracks entirely. We don't want to transcribe music or
@@ -328,32 +329,59 @@ async function processOneChapter(config: WorkerConfig, log: FastifyBaseLogger): 
         );
         continue;
       }
+      // Roster gate — skip any track whose Discord ID is not in the seeded
+      // User table. Catches unknown bots (e.g. a second Craig running as
+      // backup), throwaway accounts, and .ogg.users anchor entries with no
+      // real owner. Without this, an AudioFile row with userId=NULL would
+      // be created and block the session forever (no transcript can ever
+      // arrive for an unknown user). To onboard a new real player: add them
+      // to prisma/seed.ts and redeploy BEFORE the next recording.
       const userId = u?.discordUserId ? internalIdByDiscord.get(u.discordUserId) : undefined;
-      if (!userId) unknownUserCount += 1;
+      if (!userId) {
+        unknownUserSkipCount += 1;
+        log.warn(
+          {
+            chapterId: chapter.id,
+            trackIndex: file.trackIndex,
+            discordUserId: u?.discordUserId ?? null,
+            discordUsername: u?.discordUsername ?? null,
+            discordDisplayName: u?.discordDisplayName ?? null
+          },
+          'skipping track — Discord ID not in roster (add to seed if this is a real player)'
+        );
+        continue;
+      }
       await prisma.audioFile.upsert({
         where: {
           chapterId_trackIndex: { chapterId: chapter.id, trackIndex: file.trackIndex }
         },
         create: {
           chapterId: chapter.id,
-          userId: userId ?? null,
+          userId,
           trackIndex: file.trackIndex,
           cookedPath: file.absolutePath,
           format: 'flac',
           fileSizeBytes: BigInt(file.fileSizeBytes)
         },
         update: {
-          userId: userId ?? null,
+          userId,
           cookedPath: file.absolutePath,
           fileSizeBytes: BigInt(file.fileSizeBytes)
         }
       });
+      createdCount += 1;
     }
 
-    if (unknownUserCount > 0) {
+    if (unknownUserSkipCount > 0) {
       log.warn(
-        { chapterId: chapter.id, unknownUserCount, totalTracks: trackEntries.length, botSkipCount },
-        'some tracks did not map to a known User — seed may be missing Discord IDs'
+        {
+          chapterId: chapter.id,
+          unknownUserSkipCount,
+          totalTracks: trackEntries.length,
+          createdCount,
+          botSkipCount
+        },
+        'cook skipped tracks for users not in seed roster'
       );
     }
     if (botSkipCount > 0) {
