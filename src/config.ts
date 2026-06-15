@@ -69,14 +69,16 @@ const Env = z.object({
   ASK_TIMEOUT_MS: z.coerce.number().int().positive().default(60 * 1000),
 
   // Stage 9 — session art. One image per session, generated after the
-  // summary lands. ~$0.04/image at imagen-3.0-generate-002, posted alongside
-  // the recap. Idempotent: if an ArtPiece exists for the session, gen is
-  // skipped so retries don't double-charge.
+  // summary lands. Posted alongside the recap. Idempotent: if an ArtPiece
+  // exists for the session, gen is skipped so retries don't double-charge.
+  // Migrated 2026-06-13 from imagen-3.0-generate-002 (deprecated; shut down
+  // 2026-06-24) to gemini-3.1-flash-image (Nano Banana 2, ~$0.067/image,
+  // 32K-token prompt window vs Imagen's ~480 — eliminates silent truncation).
   SESSION_ART_ENABLED: z
     .union([z.literal('true'), z.literal('false')])
     .default('true')
     .transform((v) => v === 'true'),
-  SESSION_ART_MODEL: z.string().default('imagen-3.0-generate-002'),
+  SESSION_ART_MODEL: z.string().default('gemini-3.1-flash-image'),
   SESSION_ART_DIR: z.string().default('/app/data/session_art'),
   SESSION_ART_TIMEOUT_MS: z.coerce.number().int().positive().default(60 * 1000),
 
