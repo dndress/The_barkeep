@@ -19,6 +19,8 @@ import { makeExecute as makeRegenArtExecute, data as regenArtData } from '../com
 import * as help from '../commands/help.js';
 import * as listSessions from '../commands/listSessions.js';
 import * as recall from '../commands/recall.js';
+import * as pipelineStatus from '../commands/pipelineStatus.js';
+import * as postRecapNow from '../commands/postRecapNow.js';
 import { handleNeedsReviewButton, isNeedsReviewButton } from './needsReviewButtons.js';
 import { handlePlayerReviewButton, isPlayerReviewButton } from './playerReviewButtons.js';
 
@@ -90,7 +92,9 @@ export function wireInteractionHandler(
     },
     help,
     'list-sessions': listSessions,
-    recall
+    recall,
+    'pipeline-status': pipelineStatus,
+    'post-recap-now': postRecapNow
   };
   client.on('interactionCreate', async (interaction: Interaction) => {
     try {

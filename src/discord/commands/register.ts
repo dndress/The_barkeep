@@ -23,6 +23,8 @@ import { data as regenArtData } from './regenArt.js';
 import { data as helpData } from './help.js';
 import { data as listSessionsData } from './listSessions.js';
 import { data as recallData } from './recall.js';
+import { data as pipelineStatusData } from './pipelineStatus.js';
+import { data as postRecapNowData } from './postRecapNow.js';
 
 export async function registerSlashCommands(
   client: Client,
@@ -46,7 +48,9 @@ export async function registerSlashCommands(
     regenArtData.toJSON(),
     helpData.toJSON(),
     listSessionsData.toJSON(),
-    recallData.toJSON()
+    recallData.toJSON(),
+    pipelineStatusData.toJSON(),
+    postRecapNowData.toJSON()
   ];
   await guild.commands.set(commands);
   log.info({ guildId, count: commands.length }, 'slash commands registered');
