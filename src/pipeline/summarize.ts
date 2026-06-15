@@ -105,7 +105,10 @@ function buildPrompt(opts: {
   keyEventsTarget: number;
   characterNames: string[];
 }): string {
-  const lang = opts.languageHint === 'es' ? 'Spanish' : opts.languageHint;
+  const lang =
+    opts.languageHint === 'es'
+      ? 'neutral Latin American Spanish (español neutro latinoamericano)'
+      : opts.languageHint;
   return [
     `You will receive a chronologically interleaved transcript of one tabletop RPG session, written in ${lang} with occasional English (proper nouns, spell names, mechanics terms).`,
     'Each line is labeled with the character name speaking (or "DM" for the dungeon master).',
@@ -132,6 +135,13 @@ function buildPrompt(opts: {
     '- He refers to the party with respect and a faint analytical distance. Affection for them shows through attention to their decisions and their consequences, not declarations.',
     '- He does NOT moralize, monologue about philosophy, or lecture. He recounts. Reflection is brief and embedded in the narration.',
     '- Avoid modern slang, meme language, therapy language, and assistant phrasing ("certainly", "I hope this helps", "let me explain", "as an analysis").',
+    '',
+    'SPANISH DIALECT (apply ONLY to `short` and `full`):',
+    '- Write in neutral Latin American Spanish. Never Peninsular / Castilian Spanish.',
+    '- FORBIDDEN: "vosotros" and every conjugation derived from it (habéis, tenéis, sois, estáis, hacéis, podéis, vais, "id", "venid", "esperad"). Use "ustedes" + 3rd-person-plural verbs (han, tienen, son, están, hacen, pueden, van, vayan, vengan, esperen).',
+    '- FORBIDDEN Spain-specific slang or interjections: "vale", "tío", "tía", "joder", "hostia", "guay", "molar", "currar", "chaval", "flipar", "majo", "venga ya", "coño", "gilipollas", "cojonudo", "tronco", "chulo", "anda ya", "menudo", "qué va".',
+    '- Keep the register sober, literate, neutral — readable by a player from Mexico, Colombia, Argentina, or anywhere in Latin America without sounding foreign.',
+    '- Sigil cant (berk, cutter, the chant, dark, Prime, hardhead, blood) stays in ENGLISH and is the only non-neutral flavor permitted. It is Rikk\'s planar dialect, NOT a Spain-Spanish accent.',
     '',
     'IMMERSION RULES (apply ONLY to `short` and `full` — NOT to key_events or character_memories):',
     '- Write as an in-world storyteller recounting events that truly happened. Never break the fourth wall.',

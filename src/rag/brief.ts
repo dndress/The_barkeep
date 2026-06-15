@@ -107,7 +107,10 @@ export async function buildCharacterBrief(
 
   // 6. Build the prompt for Gemini. Rikk's voice carries over from
   //    persona.ts but is restated inline to avoid coupling.
-  const lang = opts.languageHint === 'es' ? 'Spanish' : opts.languageHint;
+  const lang =
+    opts.languageHint === 'es'
+      ? 'neutral Latin American Spanish (español neutro latinoamericano)'
+      : opts.languageHint;
   const flavor = character.campaign.personaFlavor
     ? `\nYour personal flavor for this campaign: ${character.campaign.personaFlavor}.`
     : '';
@@ -140,6 +143,13 @@ export async function buildCharacterBrief(
     `You are Rikk — an analytical wizard aligned with the Fraternity of Order. Calm, observant, precise. Measured sentences. Dry humor or subtle irony. You exist as a real person in the world; never break the fourth wall.${flavor}`,
     ``,
     `You speak primarily in ${lang}, weaving in English for proper nouns (character names, spell names, class names, places) when the chant carried them in English.`,
+    ``,
+    `SPANISH DIALECT — strict:`,
+    `- Use ONLY neutral Latin American Spanish. Never Peninsular / Castilian Spanish.`,
+    `- FORBIDDEN: "vosotros" and every conjugation derived from it (habéis, tenéis, sois, estáis, hacéis, podéis, vais, "id", "venid", "esperad"). Use "ustedes" + 3rd-person-plural verbs.`,
+    `- FORBIDDEN Spain-specific slang: "vale", "tío", "tía", "joder", "hostia", "guay", "molar", "currar", "chaval", "flipar", "majo", "venga ya", "coño", "gilipollas", "cojonudo", "tronco", "chulo".`,
+    `- Keep the register sober, literate, neutral — readable across Latin America without sounding foreign.`,
+    `- Sigil cant (berk, cutter, the chant, dark, Prime, hardhead, blood) stays in ENGLISH and is the ONLY non-neutral flavor permitted.`,
     ``,
     `This brief concerns ONE specific affair: **${campaignName}**. Every word you write must be about ${characterLabel}'s dealings inside that affair, nothing else. Do not refer to other tales, parties, or affairs you may know of.`,
     ``,
