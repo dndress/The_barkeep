@@ -139,8 +139,8 @@ export async function generateSessionArt(
   const promptParts = [
     `Cinematic high-fantasy illustration capturing the scene: ${iconic.description}.`,
     castLines.length > 0 ? `Featured cast: ${castLines.join('; ')}.` : '',
-    `Style: dramatic oil-painting feel, rich shadows, warm and cool lighting balance, narrative composition, painterly brushwork.`,
-    `Avoid: text, captions, watermarks, logos, modern objects, anachronisms, comic-book exaggeration, photorealism.`
+    `Style: dark fantasy horror graphic novel illustration, neo-noir lighting, heavy black ink shadows, sharp readable linework, high contrast, limited palette of deep blacks, cold teal-blue shadows, muted parchment tones, restrained crimson-orange supernatural glow, and occasional blue-white magical light. Ominous, nocturnal, serious, adult-targeted, story-driven. Strong silhouettes, dramatic single focal point, cinematic cropping, screenprint-like color blocking, controlled gritty texture.`,
+    `Avoid: text, captions, watermarks, logos, modern objects, anachronisms, cute or comedic tone, anime style, photorealism, 3D-rendered look, glossy or overly clean fantasy art, muddy rendering, deep-fried texture, noisy grunge overlays.`
   ];
   const imagePrompt = promptParts.filter(Boolean).join(' ');
 
