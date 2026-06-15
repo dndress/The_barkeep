@@ -73,10 +73,11 @@ RUN ln -sfn /app/rec /app/vendor/rec
 COPY entrypoint.sh ./entrypoint.sh
 RUN chmod +x ./entrypoint.sh
 
-# Create the cooked-output dir so the worker can write to it without
-# needing the volume to be pre-populated. Owned by node so the unprivileged
-# user can write.
-RUN mkdir -p /app/data/cooked && chown -R node:node /app/data
+# Pre-create mount points for named volumes so Docker preserves node:node
+# ownership when first creating the volume. If the directory doesn't exist
+# in the image, Docker creates it root-owned and the unprivileged `node`
+# process can't write to it (EACCES on first write).
+RUN mkdir -p /app/data/cooked /app/data/session_art && chown -R node:node /app/data
 
 USER node
 EXPOSE 3001
