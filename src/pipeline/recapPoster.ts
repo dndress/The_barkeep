@@ -40,10 +40,10 @@ const FIELD_NAME_PRIMARY = '✨ Eventos clave';
 const FIELD_NAME_CONT = '✨ Eventos clave (cont.)';
 
 function renderEventBullet(e: KeyEventLike): string {
-  const who = e.characters_involved?.length
-    ? ` _(${e.characters_involved.join(', ')})_`
-    : '';
-  return `• ${e.description}${who}`;
+  // 2026-06-28: character names intentionally OMITTED from the public-facing
+  // bullet. DB still carries `characters_involved` for downstream RAG/art use;
+  // we just stop printing it in the Discord embed.
+  return `• ${e.description}`;
 }
 
 /**
