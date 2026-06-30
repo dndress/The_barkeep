@@ -69,6 +69,8 @@ async function pickFeaturedCast(
     `Pick at most ${MAX_FEATURED_CAST} characters from the CANDIDATES list whose presence is most visually central to the MOMENT. Prefer characters who act, are acted upon, or anchor the focal point. Drop bystanders, witnesses, off-camera contributors.`,
     'Rules:',
     `- Choose between 1 and ${MAX_FEATURED_CAST} names. Never invent names. Only return names exactly as they appear in CANDIDATES.`,
+    '- Named non-player beings (monsters, dragons, bosses, creatures, antagonists) explicitly described in the MOMENT are almost always the visual focal point — KEEP them. Do not drop a non-player being in favor of a player character bystander.',
+    '- If forced to choose between two player characters, prefer the one performing the action over the one observing it.',
     '- Output ONLY a JSON array of strings. No prose, no markdown, no code fences.',
     '',
     `MOMENT: ${momentDescription}`,
@@ -131,6 +133,89 @@ async function pickFeaturedCast(
 }
 
 /**
+ * Ask Gemini Flash to write a one-line visual description for each NPC in
+ * `npcs`, grounded by the moment description and the full session summary
+ * (which already names the NPC and recounts the scene in-world).
+ *
+ * Best-effort. Falls back to bare names on any failure — the prompt path
+ * still labels them as named beings, so the image will at least contain
+ * "a dragon" instead of substituting a PC.
+ */
+async function describeNpcsFromSummary(
+  npcs: string[],
+  momentDescription: string,
+  summaryFull: string,
+  log: FastifyBaseLogger
+): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  if (npcs.length === 0) return out;
+
+  const prompt = [
+    'You are writing visual descriptions for non-player beings featured in a tabletop RPG scene illustration.',
+    'For each NAME below, produce a single-sentence visual description grounded ONLY in what the FULL SUMMARY and MOMENT say about that being. Include species, size, key visible features, posture, distinctive items, and visible condition (wounds, glow, aura).',
+    'Rules:',
+    '- Use ONLY visual details supported by the summary or moment. Do not invent appearance details that are not implied by the text.',
+    '- If the summary gives almost no visual detail, write a sober archetype-true description based on the species/role mentioned (e.g. "an ancient red dragon, vast and scarred, scales like cooling lava").',
+    '- One sentence per NAME. No prose outside the JSON.',
+    '- Output ONLY a JSON object mapping each NAME (exact string) to its description string. No markdown, no code fences.',
+    '',
+    `MOMENT: ${momentDescription}`,
+    '',
+    `NAMES: ${JSON.stringify(npcs)}`,
+    '',
+    'FULL SUMMARY:',
+    summaryFull
+  ].join('\n');
+
+  try {
+    const ai = getGemini();
+    interface TextPart { text?: string }
+    interface TextResp { candidates?: Array<{ content?: { parts?: TextPart[] } }>; text?: string }
+    const resp = (await Promise.race([
+      withGeminiRateLimitRetry(() =>
+        ai.models.generateContent({
+          model: CAST_PICKER_MODEL,
+          contents: prompt
+        }) as Promise<TextResp>
+      ),
+      new Promise<never>((_, reject) =>
+        setTimeout(
+          () => reject(new Error('npc describer timed out')),
+          CAST_PICKER_TIMEOUT_MS
+        )
+      )
+    ])) as TextResp;
+
+    const raw =
+      resp.text ??
+      resp.candidates?.[0]?.content?.parts?.map((p) => p.text ?? '').join('') ??
+      '';
+    const cleaned = raw.replace(/```(?:json)?/gi, '').trim();
+    const match = cleaned.match(/\{[\s\S]*\}/);
+    if (!match) throw new Error(`no JSON object in response: ${raw.slice(0, 200)}`);
+    const parsed: unknown = JSON.parse(match[0]);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error('response is not a JSON object');
+    }
+    const obj = parsed as Record<string, unknown>;
+    const wanted = new Set(npcs);
+    for (const [k, v] of Object.entries(obj)) {
+      if (!wanted.has(k)) continue;
+      if (typeof v !== 'string') continue;
+      const trimmed = v.trim();
+      if (!trimmed) continue;
+      out.set(k, trimmed);
+    }
+  } catch (err) {
+    log.warn(
+      { err: err instanceof Error ? err.message : String(err), npcs },
+      'NPC describer failed — falling back to bare names'
+    );
+  }
+  return out;
+}
+
+/**
  * Generate (or reuse, if already present) the session art piece.
  *
  * Throws on hard errors (no summary, image API returned nothing). Caller
@@ -171,7 +256,7 @@ export async function generateSessionArt(
   const session = await prisma.session.findUniqueOrThrow({
     where: { id: sessionId },
     include: {
-      summary: { select: { keyEvents: true, short: true } },
+      summary: { select: { keyEvents: true, short: true, full: true } },
       campaign: { select: { name: true } },
       sessionPlayers: {
         include: {
@@ -205,24 +290,34 @@ export async function generateSessionArt(
     throw new Error('cannot generate session art: no iconic event after sort');
   }
 
-  // 4. Build cast descriptions for characters present in the iconic moment.
-  //    "DM" is filtered out (not a visual subject). Characters with an
-  //    `appearance` field get their description woven in.
+  // 4. Build cast descriptions for beings present in the iconic moment.
+  //    "DM" is filtered out (not a visual subject).
+  //
+  //    PCs get their locked roster appearance description (consistent across
+  //    sessions). NPCs (any name in characters_involved that isn't on the
+  //    roster) get a one-line scene-grounded description generated by Gemini
+  //    Flash from the moment + summary.full — so the boss, dragon, or other
+  //    named non-player being is preserved rather than substituted with a PC.
   //
   //    2026-06-28: cap the visual cast at MAX_FEATURED_CAST. Crowded scenes
   //    degrade Gemini Image faithfulness. When more than MAX_FEATURED_CAST
-  //    characters are involved, ask a Flash text model to pick the most
-  //    visually central ones — falls back to first-N on any failure.
+  //    figures are involved, the Flash picker chooses the most visually
+  //    central ones — biased to keep named non-player beings.
+  //
+  //    2026-06-30: stopped filtering candidates to the PC roster — that was
+  //    silently dropping every NPC before the picker even saw them, and the
+  //    image model was substituting a roster PC for the missing antagonist.
   const allInvolved: string[] = (iconic.characters_involved ?? []).filter(
     (n) => n !== 'DM'
   );
-  // Narrow candidates to characters we actually have on the roster (so the
-  // picker can't be sent names with no `appearance` data to use).
   const rosterNames = new Set<string>();
   for (const sp of session.sessionPlayers) {
     if (sp.character) rosterNames.add(sp.character.name);
   }
-  const candidates: string[] = allInvolved.filter((n) => rosterNames.has(n));
+
+  // Combined candidate pool (PCs + NPCs). Picker prompt biases toward keeping
+  // named non-player beings since they're usually the focal point.
+  const candidates: string[] = allInvolved;
 
   let featured: string[];
   if (candidates.length <= MAX_FEATURED_CAST) {
@@ -237,7 +332,22 @@ export async function generateSessionArt(
   }
   const featuredSet = new Set(featured);
 
-  const castLines: string[] = [];
+  // Split featured cast into PCs (roster) and NPCs (need a description).
+  const featuredNpcNames = featured.filter((n) => !rosterNames.has(n));
+
+  // Generate scene-grounded NPC descriptions in one Flash call.
+  const npcDescriptions =
+    featuredNpcNames.length > 0
+      ? await describeNpcsFromSummary(
+          featuredNpcNames,
+          iconic.description,
+          session.summary.full ?? '',
+          log
+        )
+      : new Map<string, string>();
+
+  // PC lines: name + race/class + roster appearance.
+  const pcLines: string[] = [];
   for (const sp of session.sessionPlayers) {
     if (!sp.character) continue;
     if (!featuredSet.has(sp.character.name)) continue;
@@ -248,21 +358,51 @@ export async function generateSessionArt(
       .trim();
     if (kind) parts.push(`(${kind})`);
     if (sp.character.appearance) parts.push(`— ${sp.character.appearance}`);
-    castLines.push(parts.join(' '));
+    pcLines.push(parts.join(' '));
   }
 
+  // NPC lines: name + scene-grounded description (or bare name on fallback).
+  const npcLines: string[] = [];
+  for (const name of featuredNpcNames) {
+    const desc = npcDescriptions.get(name);
+    npcLines.push(desc ? `${name} — ${desc}` : name);
+  }
+
+  const totalFeatured = pcLines.length + npcLines.length;
+  log.info(
+    {
+      sessionId,
+      featured,
+      pcCount: pcLines.length,
+      npcCount: npcLines.length,
+      npcsDescribed: Array.from(npcDescriptions.keys())
+    },
+    'composed featured cast for session art'
+  );
+
   // 5. Compose the image prompt. Style is opinionated and consistent so
-  //    sessions feel like illustrations from one volume.
+  //    sessions feel like illustrations from one volume. PCs and NPCs are
+  //    labeled separately so the model treats both as required subjects.
+  const castSections: string[] = [];
+  if (pcLines.length > 0) {
+    castSections.push(`Featured player characters: ${pcLines.join('; ')}.`);
+  }
+  if (npcLines.length > 0) {
+    castSections.push(
+      `Featured non-player beings in this scene (these are the antagonists, monsters, or NPCs the scene revolves around and MUST appear in the image as described): ${npcLines.join('; ')}.`
+    );
+  }
+
   const castCountClause =
-    castLines.length > 0
-      ? `Depict EXACTLY ${castLines.length} named character${castLines.length === 1 ? '' : 's'} as the visual subject${castLines.length === 1 ? '' : 's'} of the scene — no additional human figures, no background crowd, no extras beyond the listed cast.`
+    totalFeatured > 0
+      ? `Depict EXACTLY ${totalFeatured} named figure${totalFeatured === 1 ? '' : 's'} as the visual subject${totalFeatured === 1 ? '' : 's'} of the scene — every player character AND every non-player being named above must be visibly present and recognizable as described. Do NOT substitute one named being for another, and do NOT replace a non-player being with a player character or vice versa.`
       : '';
   const promptParts = [
     `Cinematic high-fantasy illustration capturing the scene: ${iconic.description}.`,
-    castLines.length > 0 ? `Featured cast: ${castLines.join('; ')}.` : '',
+    ...castSections,
     castCountClause,
     `Style: dark fantasy horror graphic novel illustration, neo-noir lighting, heavy black ink shadows, sharp readable linework, high contrast, limited palette of deep blacks, cold teal-blue shadows, muted parchment tones, restrained crimson-orange supernatural glow, and occasional blue-white magical light. Ominous, nocturnal, serious, adult-targeted, story-driven. Strong silhouettes, dramatic single focal point, cinematic cropping, screenprint-like color blocking, controlled gritty texture.`,
-    `Avoid: text, captions, watermarks, logos, modern objects, anachronisms, cute or comedic tone, anime style, photorealism, 3D-rendered look, glossy or overly clean fantasy art, muddy rendering, deep-fried texture, noisy grunge overlays, extra background characters or crowd figures beyond the named cast.`
+    `Avoid: text, captions, watermarks, logos, modern objects, anachronisms, cute or comedic tone, anime style, photorealism, 3D-rendered look, glossy or overly clean fantasy art, muddy rendering, deep-fried texture, noisy grunge overlays, anonymous background figures or crowd figures beyond the named cast above.`
   ];
   const imagePrompt = promptParts.filter(Boolean).join(' ');
 
