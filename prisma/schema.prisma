@@ -52,9 +52,33 @@ model Campaign {
 
   characters     Character[]
   sessions       Session[]
+  nameAliases    CampaignNameAlias[]
 
   @@unique([discordGuildId, name])
   @@map("campaigns")
+}
+
+// Per-campaign name-correction lexicon. When transcription mishears a
+// proper noun ("Salat" → "Salad"), the admin adds an entry here via
+// /name-alias and future transcripts are auto-corrected at ingest. Empty
+// table = system inert. Word-boundary regex (see src/pipeline/nameAliases.ts)
+// prevents collateral damage on real words.
+model CampaignNameAlias {
+  id          String   @id @default(uuid())
+  campaignId  String   @map("campaign_id")
+  // Verbatim string to search for (e.g. "Salad"). Case-sensitive.
+  wrong       String
+  // Replacement string (e.g. "Salat").
+  right       String
+  // Discord user ID of the admin who added the alias. Audit only.
+  createdBy   String?  @map("created_by")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  campaign Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  @@unique([campaignId, wrong])
+  @@index([campaignId])
+  @@map("campaign_name_aliases")
 }
 
 model User {
@@ -391,6 +415,7 @@ enum MemoryKind {
   WOUND        @map("wound")
   QUIRK        @map("quirk")
 }
+
 
 model CharacterMemory {
   id          String     @id @default(uuid())

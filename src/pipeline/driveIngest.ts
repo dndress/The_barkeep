@@ -21,6 +21,12 @@ import type { FastifyBaseLogger } from 'fastify';
 import { getPrisma } from '../db.js';
 import { parseCombinedTranscript } from './combinedTranscript.js';
 import { parseInfoFile } from './infoFile.js';
+import {
+  applyAliases,
+  applyAliasesToJson,
+  loadAliasesForCampaign,
+  type NameAlias
+} from './nameAliases.js';
 import { parseWhisperJsonString, extractDiscordUsernameFromCookFilename } from './whisperJson.js';
 
 const DRIVE_API = 'https://www.googleapis.com/drive/v3';
@@ -155,6 +161,20 @@ export async function pollDriveOnce(
       });
     }
 
+    // Per-campaign name-correction lexicon. Empty array (campaign not yet
+    // detected, or no aliases registered) → both helpers below are no-ops.
+    // The summarizer runs a defensive second pass, so a missed correction
+    // here still gets caught one stage later.
+    let aliases: NameAlias[] = [];
+    try {
+      aliases = await loadAliasesForCampaign(prisma, session.campaignId);
+    } catch (err) {
+      log.warn(
+        { err: (err as Error).message, recordingId },
+        'name-alias load failed; continuing without corrections'
+      );
+    }
+
     // 3. List files in the subfolder.
     let filesInSession: DriveFile[];
     try {
@@ -215,11 +235,15 @@ export async function pollDriveOnce(
           if (parsed.segments.length === 0) {
             report.errors.push(`combined ${recordingId}: no parseable [HH:MM:SS] lines`);
           } else {
+            // Apply per-campaign name corrections to both the raw text and
+            // the parsed segments. No-op when aliases is empty.
+            const correctedFullText = applyAliases(body, aliases);
+            const correctedSegments = applyAliasesToJson(parsed.segments, aliases);
             await prisma.combinedTranscript.create({
               data: {
                 sessionId: session.id,
-                fullText: body,
-                segments: parsed.segments as unknown as object,
+                fullText: correctedFullText,
+                segments: correctedSegments as unknown as object,
                 sourceFileName: combinedDrive.name
               }
             });
@@ -316,12 +340,16 @@ export async function pollDriveOnce(
         continue;
       }
 
+      // Apply per-campaign name corrections to the per-track transcript.
+      // No-op when aliases is empty. Embedder reads from this row.
+      const correctedFullText = applyAliases(parsed.fullText, aliases);
+      const correctedSegments = applyAliasesToJson(parsed.segments, aliases);
       await prisma.$transaction([
         prisma.transcript.create({
           data: {
             audioFileId: target.id,
-            fullText: parsed.fullText,
-            segments: parsed.segments as unknown as object,
+            fullText: correctedFullText,
+            segments: correctedSegments as unknown as object,
             language: parsed.language
           }
         }),

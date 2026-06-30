@@ -20,6 +20,11 @@ import { z } from 'zod';
 
 import { parseCombinedTranscript } from './combinedTranscript.js';
 import { getGemini } from './gemini.js';
+import {
+  applyAliases,
+  loadAliasesForCampaign,
+  type NameAlias
+} from './nameAliases.js';
 
 export interface SummarizeOptions {
   prisma: PrismaClient;
@@ -377,11 +382,36 @@ async function runSummaryModel(args: {
   // Post-trim key_events to the cap in case the model overshot.
   const trimmedEvents = validated.data.key_events.slice(0, opts.keyEventsTarget);
 
+
+  // Defensive name-correction pass. Catches cases where the model itself
+  // misspelled a correct input (rare but possible) — the ingest-time pass
+  // already covered transcripts before the model saw them, so this is the
+  // belt to the suspenders. No-op when no aliases registered.
+  let aliases: NameAlias[] = [];
+  try {
+    const session = await opts.prisma.session.findUnique({
+      where: { id: opts.sessionId },
+      select: { campaignId: true }
+    });
+    aliases = await loadAliasesForCampaign(opts.prisma, session?.campaignId);
+  } catch {
+    // Swallow — the alias pass is defensive; the worker can recover.
+  }
+
   return {
-    short: validated.data.short,
-    full: validated.data.full,
-    keyEvents: trimmedEvents,
-    characterMemories: validated.data.character_memories,
+    short: applyAliases(validated.data.short, aliases),
+    full: applyAliases(validated.data.full, aliases),
+    keyEvents: trimmedEvents.map((ev) => ({
+      description: applyAliases(ev.description, aliases),
+      characters_involved: ev.characters_involved.map((n) => applyAliases(n, aliases)),
+      importance: ev.importance
+    })),
+    characterMemories: validated.data.character_memories.map((m) => ({
+      characterName: applyAliases(m.characterName, aliases),
+      kind: m.kind,
+      content: applyAliases(m.content, aliases),
+      importance: m.importance
+    })),
     interleavedTranscript
   };
 }

@@ -21,6 +21,7 @@ import * as listSessions from '../commands/listSessions.js';
 import * as recall from '../commands/recall.js';
 import * as pipelineStatus from '../commands/pipelineStatus.js';
 import * as postRecapNow from '../commands/postRecapNow.js';
+import * as nameAlias from '../commands/nameAlias.js';
 import { handleNeedsReviewButton, isNeedsReviewButton } from './needsReviewButtons.js';
 import { handlePlayerReviewButton, isPlayerReviewButton } from './playerReviewButtons.js';
 
@@ -94,7 +95,8 @@ export function wireInteractionHandler(
     'list-sessions': listSessions,
     recall,
     'pipeline-status': pipelineStatus,
-    'post-recap-now': postRecapNow
+    'post-recap-now': postRecapNow,
+    'name-alias': nameAlias
   };
   client.on('interactionCreate', async (interaction: Interaction) => {
     try {

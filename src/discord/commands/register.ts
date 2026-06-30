@@ -25,6 +25,7 @@ import { data as listSessionsData } from './listSessions.js';
 import { data as recallData } from './recall.js';
 import { data as pipelineStatusData } from './pipelineStatus.js';
 import { data as postRecapNowData } from './postRecapNow.js';
+import { data as nameAliasData } from './nameAlias.js';
 
 export async function registerSlashCommands(
   client: Client,
@@ -50,7 +51,8 @@ export async function registerSlashCommands(
     listSessionsData.toJSON(),
     recallData.toJSON(),
     pipelineStatusData.toJSON(),
-    postRecapNowData.toJSON()
+    postRecapNowData.toJSON(),
+    nameAliasData.toJSON()
   ];
   await guild.commands.set(commands);
   log.info({ guildId, count: commands.length }, 'slash commands registered');

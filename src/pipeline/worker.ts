@@ -35,6 +35,11 @@ import {
 import { embedSession } from './embedSession.js';
 import { withGeminiRateLimitRetry } from './gemini.js';
 import { parseInfoFile, normalizeUsername } from './infoFile.js';
+import {
+  applyAliases,
+  applyAliasesToJson,
+  loadAliasesForCampaign
+} from './nameAliases.js';
 import { reconcileSession, type PerTrackExtraction } from './reconcile.js';
 import { postOneScheduledRecap } from './recapPoster.js';
 import { generateSessionArt } from './sessionArt.js';
@@ -619,15 +624,39 @@ async function transcribeOne(
       languageHint: config.transcribeLanguageHint,
       timeoutMs: config.transcribeTimeoutMs
     });
+
+    // Per-campaign name-correction lexicon. Resolved via the audio file's
+    // chapter → session → campaign chain. No-op when campaignId is null
+    // (campaign not yet detected) or aliases is empty.
+    let correctedFullText = result.fullText;
+    let correctedSegments: unknown = result.segments;
+    try {
+      const ctx = await prisma.audioFile.findUnique({
+        where: { id: audioFileId },
+        select: { chapter: { select: { session: { select: { campaignId: true } } } } }
+      });
+      const aliases = await loadAliasesForCampaign(
+        prisma,
+        ctx?.chapter?.session?.campaignId
+      );
+      correctedFullText = applyAliases(result.fullText, aliases);
+      correctedSegments = applyAliasesToJson(result.segments, aliases);
+    } catch (err) {
+      log.warn(
+        { err: (err as Error).message, audioFileId },
+        'name-alias load failed; persisting transcript without corrections'
+      );
+    }
+
     await prisma.$transaction([
       prisma.transcript.create({
         data: {
           audioFileId,
-          fullText: result.fullText,
+          fullText: correctedFullText,
           // Cast: Prisma Json type accepts any JSON-serializable value at
           // runtime; the segments shape is validated by zod inside
           // transcribeAudioFile so we know it's safe here.
-          segments: result.segments as unknown as object,
+          segments: correctedSegments as unknown as object,
           language: result.language,
           geminiRequestId: result.responseId
         }
